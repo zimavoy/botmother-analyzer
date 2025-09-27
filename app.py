@@ -1,123 +1,123 @@
 import os
-import json
 from flask import Flask, request, jsonify
-import openai
+from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
+# === Flask ===
 app = Flask(__name__)
 
-# ?? OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# ?? Google API
-SCOPES = [
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/spreadsheets"
-]
-creds = Credentials.from_service_account_file("credentials.json", scopes=SCOPES)
-
-# Google Sheets
+# === РљРѕРЅС„РёРіСѓСЂР°С†РёСЏ ===
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-client = gspread.authorize(creds)
-sheet = client.open_by_key(SPREADSHEET_ID).sheet1
+TO_ANALYZE_FOLDER_ID = os.getenv("TO_ANALYZE_FOLDER_ID")
+ANALYZED_FOLDER_ID = os.getenv("ANALYZED_FOLDER_ID")
 
-# Google Drive
+# === Google Р°РІС‚РѕСЂРёР·Р°С†РёСЏ ===
+creds = Credentials.from_service_account_file(
+    "credentials.json",
+    scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
+)
+
 drive_service = build("drive", "v3", credentials=creds)
-TO_ANALYZE_FOLDER = os.getenv("TO_ANALYZE_FOLDER_ID")
-ANALYZED_FOLDER = os.getenv("ANALYZED_FOLDER_ID")
+sheets_client = gspread.authorize(creds)
+sheet = sheets_client.open_by_key(SPREADSHEET_ID).sheet1
+
+# === OpenAI РєР»РёРµРЅС‚ ===
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-def analyze_image(image_url: str) -> dict:
-    """Анализ фото в OpenAI Vision с JSON-ответом"""
-    response = openai.ChatCompletion.create(
+# --- Р¤СѓРЅРєС†РёСЏ: Р°РЅР°Р»РёР· С„РѕС‚Рѕ ---
+def analyze_photo_openai(image_url):
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Ты эксперт по запчастям строительной техники. "
-                    "Определи каталожный номер, название детали, технику и описание. "
-                    "Отвечай строго в формате JSON с ключами: "
-                    "{'part_number': str, 'name': str, 'machine': str, 'description': str}."
-                )
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Распознай данные по фото:"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-            }
-        ]
+            {"role": "system", "content": "РўС‹ СЌРєСЃРїРµСЂС‚ РїРѕ Р·Р°РїС‡Р°СЃС‚СЏРј СЃС‚СЂРѕРёС‚РµР»СЊРЅРѕР№ С‚РµС…РЅРёРєРё."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "РћРїСЂРµРґРµР»Рё РєР°С‚Р°Р»РѕР¶РЅС‹Р№ РЅРѕРјРµСЂ, РѕРїРёСЃР°РЅРёРµ Рё РґР»СЏ РєР°РєРѕР№ С‚РµС…РЅРёРєРё РїРѕРґС…РѕРґРёС‚ СЌС‚Р° РґРµС‚Р°Р»СЊ."},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]}
+        ],
+        max_tokens=300
     )
-
-    text = response["choices"][0]["message"]["content"].strip()
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = {
-            "part_number": "UNKNOWN",
-            "name": "Не распознано",
-            "machine": "",
-            "description": text
-        }
-    return data
+    return response.choices[0].message.content.strip()
 
 
-def move_file(file_id: str, to_folder: str):
-    """Перемещает файл в другую папку Google Drive"""
+# --- Р¤СѓРЅРєС†РёСЏ: РїРµСЂРµРЅРѕСЃ С„Р°Р№Р»Р° РІ РґСЂСѓРіСѓСЋ РїР°РїРєСѓ РЅР° Google Drive ---
+def move_file(file_id, new_folder_id):
     file = drive_service.files().get(fileId=file_id, fields="parents").execute()
-    prev_parents = ",".join(file.get("parents"))
+    previous_parents = ",".join(file.get("parents"))
 
-    drive_service.files().update(
+    updated_file = drive_service.files().update(
         fileId=file_id,
-        addParents=to_folder,
-        removeParents=prev_parents,
+        addParents=new_folder_id,
+        removeParents=previous_parents,
         fields="id, parents"
     ).execute()
+
+    return updated_file
+
+
+# --- Р¤СѓРЅРєС†РёСЏ: РґРѕР±Р°РІРёС‚СЊ СЃС‚СЂРѕРєСѓ РІ Google Sheets ---
+def add_row_to_sheet(catalog_number, description, machine_type, photo_url):
+    sheet.append_row([catalog_number, description, machine_type, photo_url])
+
+
+# === РњР°СЂС€СЂСѓС‚С‹ ===
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "ok", "message": "pong"})
 
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    results = []
-    query = f"'{TO_ANALYZE_FOLDER}' in parents and mimeType contains 'image/'"
-    files = drive_service.files().list(q=query, fields="files(id, name, webViewLink)").execute().get("files", [])
+    """
+    Р­РЅРґРїРѕРёРЅС‚, РєРѕС‚РѕСЂС‹Р№ РїРµСЂРµР±РёСЂР°РµС‚ РІСЃРµ С„РѕС‚Рѕ РІ РїР°РїРєРµ TO_ANALYZE,
+    РѕС‚РїСЂР°РІР»СЏРµС‚ РёС… РІ OpenAI, РїРµСЂРµРЅРѕСЃРёС‚ РІ ANALYZED Рё РїРёС€РµС‚ РґР°РЅРЅС‹Рµ РІ Google Sheets.
+    """
+    # 1. РџРѕР»СѓС‡Р°РµРј СЃРїРёСЃРѕРє С„Р°Р№Р»РѕРІ
+    results = drive_service.files().list(
+        q=f"'{TO_ANALYZE_FOLDER_ID}' in parents and mimeType contains 'image/'",
+        fields="files(id, name, webViewLink)"
+    ).execute()
 
-    if not files:
-        return jsonify({"result": "Нет фото для анализа"})
+    files = results.get("files", [])
+    processed = []
 
-    for file in files:
-        file_id = file["id"]
-        name = file["name"]
-        url = f"https://drive.google.com/uc?id={file_id}"
+    for f in files:
+        file_id = f["id"]
+        file_url = f["webViewLink"]
 
-        # 1. Анализируем фото
-        data = analyze_image(url)
+        # 2. РђРЅР°Р»РёР·РёСЂСѓРµРј С„РѕС‚Рѕ С‡РµСЂРµР· OpenAI
+        try:
+            analysis = analyze_photo_openai(file_url)
+            # Р—РґРµСЃСЊ РјРѕР¶РЅРѕ РїР°СЂСЃРёС‚СЊ РѕС‚РІРµС‚ РІ JSON, РїРѕРєР° РїСЂРѕСЃС‚Рѕ СЃРѕС…СЂР°РЅСЏРµРј СЃС‚СЂРѕРєСѓ
+            catalog_number, description, machine_type = analysis, "-", "-"
+        except Exception as e:
+            analysis = f"РћС€РёР±РєР° Р°РЅР°Р»РёР·Р°: {e}"
+            catalog_number, description, machine_type = "-", "-", "-"
 
-        # 2. Перемещаем фото в папку analyzed
-        move_file(file_id, ANALYZED_FOLDER)
+        # 3. РџРµСЂРµРЅРѕСЃРёРј С„Р°Р№Р» РІ РїР°РїРєСѓ ANALYZED
+        move_file(file_id, ANALYZED_FOLDER_ID)
 
-        # 3. Записываем в Google Sheets
-        sheet.append_row([
-            data.get("part_number"),
-            data.get("name"),
-            data.get("machine"),
-            data.get("description"),
-            file["webViewLink"]
-        ])
+        # 4. Р—Р°РїРёСЃС‹РІР°РµРј РІ Google Sheets
+        add_row_to_sheet(catalog_number, description, machine_type, file_url)
 
-        results.append(
-            f"{name} > {data.get('part_number')} | {data.get('name')} | {data.get('machine')}"
-        )
+        processed.append({
+            "file": f["name"],
+            "catalog_number": catalog_number,
+            "description": description,
+            "machine_type": machine_type
+        })
 
     return jsonify({
-        "result": f"? Обработано {len(results)} фото",
-        "details": results
+        "status": "done",
+        "processed_count": len(processed),
+        "processed": processed
     })
 
 
+# === Р—Р°РїСѓСЃРє Flask ===
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
