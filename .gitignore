@@ -1,0 +1,39 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+
+# --- Virtual environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- Environment variables ---
+.env
+.env.local
+.env.*.local
+
+# --- Google credentials ---
+credentials.json
+
+# --- Logs & temp files ---
+*.log
+*.out
+*.err
+*.tmp
+*.swp
+
+# --- OS-specific ---
+.DS_Store
+Thumbs.db
+
+# --- IDE-specific ---
+.vscode/
+.idea/
+*.iml
