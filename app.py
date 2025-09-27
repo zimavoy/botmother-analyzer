@@ -1,10 +1,10 @@
 import os
 import traceback
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# === Переменные окружения ===
+# --- Обязательные переменные окружения ---
 REQUIRED_ENV_VARS = [
     "OPENAI_API_KEY",
     "SPREADSHEET_ID",
@@ -12,114 +12,74 @@ REQUIRED_ENV_VARS = [
     "ANALYZED_FOLDER_ID"
 ]
 
+# --- Проверка переменных окружения и credentials.json при старте ---
 @app.before_first_request
-def check_env():
-    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
-    if missing:
-        print(f"[WARNING] Missing environment variables: {', '.join(missing)}")
+def check_requirements():
+    print("[INFO] Проверка требований перед запуском приложения...")
+
+    # Проверка переменных окружения
+    missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing_vars:
+        print(f"[WARNING] Отсутствуют переменные окружения: {', '.join(missing_vars)}")
     else:
-        print("[INFO] All required environment variables found.")
+        print("[INFO] Все обязательные переменные окружения заданы.")
 
+    # Проверка credentials.json
+    if not os.path.exists("credentials.json"):
+        print("[WARNING] credentials.json не найден! Google API не будет работать до его добавления.")
+    else:
+        print("[INFO] credentials.json найден.")
 
-# === Пинг для проверки сервиса ===
+# --- /ping эндпоинт ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
-
-# === Ленивое подключение Google API ===
+# --- Ленивое подключение Google API ---
 def get_google_services():
     try:
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
         import gspread
 
-        creds_file = "credentials.json"
-        if not os.path.exists(creds_file):
+        creds_path = "credentials.json"
+        if not os.path.exists(creds_path):
             raise FileNotFoundError("credentials.json не найден!")
 
         creds = Credentials.from_service_account_file(
-            creds_file,
+            creds_path,
             scopes=[
                 "https://www.googleapis.com/auth/drive",
                 "https://www.googleapis.com/auth/spreadsheets"
             ]
         )
+
         drive_service = build("drive", "v3", credentials=creds)
         sheets_client = gspread.authorize(creds)
         sheet = sheets_client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
 
         print("[INFO] Google API подключены успешно.")
         return drive_service, sheet
-    except Exception as e:
+    except Exception:
         print("[ERROR] Ошибка подключения Google API:")
         traceback.print_exc()
         raise
 
-
-# === Ленивое подключение OpenAI ===
+# --- Ленивое подключение OpenAI ---
 def get_openai_client():
     try:
         from openai import OpenAI
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY не задан!")
-        print("[INFO] OpenAI клиент создан успешно.")
+        print("[INFO] OpenAI клиент готов.")
         return OpenAI(api_key=api_key)
-    except Exception as e:
+    except Exception:
         print("[ERROR] Ошибка подключения OpenAI:")
         traceback.print_exc()
         raise
 
-
-# === Работа с Google Drive / Sheets / OpenAI ===
-def move_file(drive_service, file_id, new_folder_id):
-    try:
-        file = drive_service.files().get(fileId=file_id, fields="parents").execute()
-        previous_parents = ",".join(file.get("parents"))
-        updated_file = drive_service.files().update(
-            fileId=file_id,
-            addParents=new_folder_id,
-            removeParents=previous_parents,
-            fields="id, parents"
-        ).execute()
-        return updated_file
-    except Exception:
-        print(f"[ERROR] Ошибка при перемещении файла {file_id}:")
-        traceback.print_exc()
-        raise
-
-
-def add_row_to_sheet(sheet, catalog_number, description, machine_type, photo_url):
-    try:
-        sheet.append_row([catalog_number, description, machine_type, photo_url])
-    except Exception:
-        print(f"[ERROR] Ошибка при добавлении строки для фото {photo_url}:")
-        traceback.print_exc()
-        raise
-
-
-def analyze_photo_openai(client, image_url):
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Определи каталожный номер, описание и для какой техники подходит эта деталь."},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]}
-            ],
-            max_tokens=300
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        print(f"[ERROR] Ошибка анализа фото {image_url}:")
-        traceback.print_exc()
-        raise
-
-
-# === Эндпоинт анализа ===
+# --- Эндпоинт /analyze ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -130,7 +90,6 @@ def analyze():
 
     TO_ANALYZE_FOLDER_ID = os.getenv("TO_ANALYZE_FOLDER_ID")
     ANALYZED_FOLDER_ID = os.getenv("ANALYZED_FOLDER_ID")
-
     processed = []
 
     try:
@@ -147,22 +106,47 @@ def analyze():
     for f in files:
         file_id = f["id"]
         file_url = f["webViewLink"]
+        catalog_number = description = machine_type = "UNKNOWN"
 
+        # --- Анализ фото через OpenAI ---
         try:
-            analysis = analyze_photo_openai(openai_client, file_url)
-            catalog_number, description, machine_type = analysis, "-", "-"
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": "Определи каталожный номер, описание и для какой техники подходит эта деталь."},
+                        {"type": "image_url", "image_url": {"url": file_url}}
+                    ]}
+                ],
+                max_tokens=300
+            )
+            result_text = response.choices[0].message.content.strip()
+            catalog_number, description, machine_type = result_text, "-", "-"
         except Exception:
-            catalog_number, description, machine_type = "-", "-", "-"
+            print(f"[ERROR] Ошибка анализа фото {file_url}:")
+            traceback.print_exc()
 
+        # --- Перенос файла в папку analyzed ---
         try:
-            move_file(drive_service, file_id, ANALYZED_FOLDER_ID)
+            file_info = drive_service.files().get(fileId=file_id, fields="parents").execute()
+            previous_parents = ",".join(file_info.get("parents"))
+            drive_service.files().update(
+                fileId=file_id,
+                addParents=ANALYZED_FOLDER_ID,
+                removeParents=previous_parents,
+                fields="id, parents"
+            ).execute()
         except Exception:
-            pass
+            print(f"[ERROR] Ошибка перемещения файла {file_id}:")
+            traceback.print_exc()
 
+        # --- Добавление строки в Google Sheets ---
         try:
-            add_row_to_sheet(sheet, catalog_number, description, machine_type, file_url)
+            sheet.append_row([catalog_number, description, machine_type, file_url])
         except Exception:
-            pass
+            print(f"[ERROR] Ошибка добавления строки для {file_url}:")
+            traceback.print_exc()
 
         processed.append({
             "file": f["name"],
@@ -171,13 +155,9 @@ def analyze():
             "machine_type": machine_type
         })
 
-    return jsonify({
-        "status": "done",
-        "processed_count": len(processed),
-        "processed": processed
-    })
+    return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
-
+# --- Запуск Flask ---
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Flask запускается на порту {port}...")
