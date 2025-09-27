@@ -25,3 +25,5 @@ ENV PORT=5000
 
 # Команда запуска (через gunicorn)
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+
+COPY credentials.json .
