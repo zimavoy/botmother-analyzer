@@ -14,7 +14,6 @@ REQUIRED_ENV_VARS = [
 
 def check_requirements():
     print("[INFO] Проверка требований перед запуском приложения...")
-
     # Проверка переменных окружения
     missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
     if missing_vars:
@@ -58,14 +57,14 @@ def get_google_services():
     print("[INFO] Google API подключены успешно.")
     return drive_service, sheet
 
-# --- Ленивое подключение OpenAI ---
+# --- Ленивое подключение OpenAI (без proxies!) ---
 def get_openai_client():
     from openai import OpenAI
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY не задан!")
     print("[INFO] OpenAI клиент готов.")
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key)  # ⚡ proxies больше не используем
 
 # --- Эндпоинт /analyze ---
 @app.route("/analyze", methods=["POST"])
@@ -148,7 +147,7 @@ def analyze():
 
 # --- Запуск Flask ---
 if __name__ == "__main__":
-    check_requirements()  # ✅ теперь вызываем напрямую при старте
+    check_requirements()
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Flask запускается на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
