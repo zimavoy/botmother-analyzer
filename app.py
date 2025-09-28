@@ -1,8 +1,9 @@
 import os
 import traceback
-import requests
 import base64
+from io import BytesIO
 from flask import Flask, jsonify
+from googleapiclient.http import MediaIoBaseDownload
 
 app = Flask(__name__)
 
@@ -60,27 +61,22 @@ def get_openai_client():
     return OpenAI(api_key=api_key)
 
 def download_image_base64(file_id, drive_service):
-    """Скачивает файл из Google Drive и возвращает base64."""
+    """Скачивает файл через Google Drive API и возвращает base64."""
     try:
-        request = drive_service.files().get_media(fileId=file_id)
-        from io import BytesIO
         fh = BytesIO()
-        downloader = build("media", "v1", credentials=None).files().get_media(fileId=file_id)
-        # Используем requests через exportLink
-        resp = drive_service.files().get(fileId=file_id, fields="webContentLink").execute()
-        download_url = resp.get("webContentLink")
-        if not download_url:
-            raise ValueError("Не удалось получить ссылку для скачивания")
-        r = requests.get(download_url)
-        r.raise_for_status()
-        return base64.b64encode(r.content).decode("utf-8")
+        request = drive_service.files().get_media(fileId=file_id)
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        return base64.b64encode(fh.read()).decode("utf-8")
     except Exception as e:
         print(f"[ERROR] Ошибка скачивания файла {file_id}: {e}")
         return None
 
 def analyze_image_base64(openai_client, image_b64):
     """Отправляет изображение в OpenAI Vision и парсит ответ."""
-    from openai import OpenAI
     try:
         resp = openai_client.responses.create(
             model="gpt-4.1-mini",
@@ -140,6 +136,7 @@ def analyze():
 
         image_b64 = download_image_base64(file_id, drive_service)
         if not image_b64:
+            print(f"[WARNING] Пропускаем файл {file_name} — не удалось скачать.")
             continue
 
         catalog_number, description, machine_type = analyze_image_base64(openai_client, image_b64)
