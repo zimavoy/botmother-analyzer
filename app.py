@@ -12,8 +12,6 @@ REQUIRED_ENV_VARS = [
     "ANALYZED_FOLDER_ID"
 ]
 
-# --- Проверка переменных окружения и credentials.json при старте ---
-@app.before_first_request
 def check_requirements():
     print("[INFO] Проверка требований перед запуском приложения...")
 
@@ -37,47 +35,37 @@ def ping():
 
 # --- Ленивое подключение Google API ---
 def get_google_services():
-    try:
-        from google.oauth2.service_account import Credentials
-        from googleapiclient.discovery import build
-        import gspread
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    import gspread
 
-        creds_path = "credentials.json"
-        if not os.path.exists(creds_path):
-            raise FileNotFoundError("credentials.json не найден!")
+    creds_path = "credentials.json"
+    if not os.path.exists(creds_path):
+        raise FileNotFoundError("credentials.json не найден!")
 
-        creds = Credentials.from_service_account_file(
-            creds_path,
-            scopes=[
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/spreadsheets"
-            ]
-        )
+    creds = Credentials.from_service_account_file(
+        creds_path,
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets"
+        ]
+    )
 
-        drive_service = build("drive", "v3", credentials=creds)
-        sheets_client = gspread.authorize(creds)
-        sheet = sheets_client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
+    drive_service = build("drive", "v3", credentials=creds)
+    sheets_client = gspread.authorize(creds)
+    sheet = sheets_client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
 
-        print("[INFO] Google API подключены успешно.")
-        return drive_service, sheet
-    except Exception:
-        print("[ERROR] Ошибка подключения Google API:")
-        traceback.print_exc()
-        raise
+    print("[INFO] Google API подключены успешно.")
+    return drive_service, sheet
 
 # --- Ленивое подключение OpenAI ---
 def get_openai_client():
-    try:
-        from openai import OpenAI
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY не задан!")
-        print("[INFO] OpenAI клиент готов.")
-        return OpenAI(api_key=api_key)
-    except Exception:
-        print("[ERROR] Ошибка подключения OpenAI:")
-        traceback.print_exc()
-        raise
+    from openai import OpenAI
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY не задан!")
+    print("[INFO] OpenAI клиент готов.")
+    return OpenAI(api_key=api_key)
 
 # --- Эндпоинт /analyze ---
 @app.route("/analyze", methods=["POST"])
@@ -86,6 +74,7 @@ def analyze():
         drive_service, sheet = get_google_services()
         openai_client = get_openai_client()
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
     TO_ANALYZE_FOLDER_ID = os.getenv("TO_ANALYZE_FOLDER_ID")
@@ -127,7 +116,7 @@ def analyze():
             print(f"[ERROR] Ошибка анализа фото {file_url}:")
             traceback.print_exc()
 
-        # --- Перенос файла в папку analyzed ---
+        # --- Перенос файла в analyzed ---
         try:
             file_info = drive_service.files().get(fileId=file_id, fields="parents").execute()
             previous_parents = ",".join(file_info.get("parents"))
@@ -159,6 +148,7 @@ def analyze():
 
 # --- Запуск Flask ---
 if __name__ == "__main__":
+    check_requirements()  # ✅ теперь вызываем напрямую при старте
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Flask запускается на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
