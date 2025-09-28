@@ -1,6 +1,7 @@
 import os
 import traceback
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+import requests
 
 app = Flask(__name__)
 
@@ -14,14 +15,12 @@ REQUIRED_ENV_VARS = [
 
 def check_requirements():
     print("[INFO] Проверка требований перед запуском приложения...")
-    # Проверка переменных окружения
     missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
     if missing_vars:
         print(f"[WARNING] Отсутствуют переменные окружения: {', '.join(missing_vars)}")
     else:
         print("[INFO] Все обязательные переменные окружения заданы.")
 
-    # Проверка credentials.json
     if not os.path.exists("credentials.json"):
         print("[WARNING] credentials.json не найден! Google API не будет работать до его добавления.")
     else:
@@ -57,16 +56,16 @@ def get_google_services():
     print("[INFO] Google API подключены успешно.")
     return drive_service, sheet
 
-# --- Ленивое подключение OpenAI (без proxies!) ---
+# --- Ленивое подключение OpenAI ---
 def get_openai_client():
     from openai import OpenAI
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY не задан!")
     print("[INFO] OpenAI клиент готов.")
-    return OpenAI(api_key=api_key)  # ⚡ proxies больше не используем
+    return OpenAI(api_key=api_key)  # ✅ без proxies
 
-# --- Эндпоинт /analyze ---
+# --- /analyze эндпоинт ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -111,6 +110,7 @@ def analyze():
             )
             result_text = response.choices[0].message.content.strip()
             catalog_number, description, machine_type = result_text, "-", "-"
+            print(f"[INFO] OpenAI response для {file_url}: {result_text}")
         except Exception:
             print(f"[ERROR] Ошибка анализа фото {file_url}:")
             traceback.print_exc()
