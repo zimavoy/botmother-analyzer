@@ -8,24 +8,16 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# --- Проверка окружения ---
 REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
 def check_requirements():
-    print("[INFO] Проверка переменных окружения...")
+    print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
         print(f"[WARNING] Не заданы: {', '.join(missing)}")
-    else:
-        print("[INFO] Все переменные окружения найдены.")
-
     if not os.path.exists("credentials.json"):
         print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
-    else:
-        print("[INFO] credentials.json найден.")
 
-
-# --- Google API ---
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
@@ -35,22 +27,13 @@ def get_google_services():
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
     return drive_service, sheet
 
-
-# --- OpenAI ---
 def get_openai_client():
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise ValueError("Нет OPENAI_API_KEY")
-    return OpenAI(api_key=key)
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-
-# --- healthcheck ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
-
-# --- Анализ ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -67,7 +50,7 @@ def analyze():
     try:
         results = drive.files().list(
             q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
-            fields="files(id, name, webViewLink)",
+            fields="files(id, name, webViewLink, webContentLink)",
         ).execute()
         files = results.get("files", [])
     except Exception as e:
@@ -75,7 +58,14 @@ def analyze():
         return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
 
     for f in files:
-        file_id, file_name, file_url = f["id"], f["name"], f["webViewLink"]
+        file_id, file_name = f["id"], f["name"]
+
+        # пробуем webContentLink, если нет — генерим вручную
+        file_url = f.get("webContentLink")
+        if not file_url:
+            file_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            print(f"[INFO] webContentLink не найден, сгенерирован {file_url}")
+
         catalog_number, description, machine_type = "UNKNOWN", "UNKNOWN", "UNKNOWN"
 
         try:
@@ -145,7 +135,6 @@ def analyze():
         )
 
     return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
-
 
 if __name__ == "__main__":
     check_requirements()
