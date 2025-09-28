@@ -1,27 +1,23 @@
-# Базовый образ Python
+# Используем стабильный образ Python
 FROM python:3.11-slim
 
-# Устанавливаем системные зависимости
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
+# Устанавливаем зависимости системы (нужны для google-api-python-client и gspread)
+RUN apt-get update && apt-get install -y \
+    build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Рабочая директория
+# Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Копируем зависимости
-COPY requirements.txt .
-
-# Устанавливаем Python-зависимости
+# Копируем файлы проекта
+COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем весь проект
 COPY . .
 
-# Переменные окружения (PORT можно перезаписать в Render)
-ENV PORT=5000
+# Открываем порт
+EXPOSE 5000
 
-# Команда запуска через gunicorn
+# Запуск через Gunicorn (рекомендовано Render)
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
