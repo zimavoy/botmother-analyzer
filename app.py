@@ -1,7 +1,6 @@
 import os
 import traceback
 from flask import Flask, jsonify, request
-import requests
 
 app = Flask(__name__)
 
@@ -25,10 +24,12 @@ def check_requirements():
     else:
         print("[INFO] credentials.json найден.")
 
+# --- /ping ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
+# --- Google API ---
 def get_google_services():
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
@@ -48,14 +49,50 @@ def get_google_services():
     print("[INFO] Google API подключены")
     return drive_service, sheet
 
+# --- OpenAI Vision ---
 def get_openai_client():
     from openai import OpenAI
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY не задан!")
     print("[INFO] OpenAI клиент готов")
-    return OpenAI(api_key=api_key)  # ✅ только api_key, никаких proxies
+    return OpenAI(api_key=api_key)  # ✅ только api_key
 
+def analyze_image(openai_client, file_url):
+    """
+    Отправляет изображение в OpenAI Vision и получает текстовый результат.
+    """
+    try:
+        resp = openai_client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
+                {"role": "user", "content": "Ты эксперт по запчастям спецтехники. "
+                                            "Определи каталожный номер, описание и технику для этой детали."},
+                {"role": "user", "content": {"type": "input_image", "image_url": file_url}}
+            ]
+        )
+
+        result_text = resp.output_text.strip()
+        print(f"[INFO] OpenAI ответ для {file_url}: {result_text}")
+
+        catalog_number = description = machine_type = "UNKNOWN"
+        lines = result_text.split("\n")
+        for line in lines:
+            line_lower = line.lower()
+            if "каталог" in line_lower or "номер" in line_lower:
+                catalog_number = line.split(":")[-1].strip()
+            elif "описание" in line_lower:
+                description = line.split(":")[-1].strip()
+            elif "техника" in line_lower or "машина" in line_lower:
+                machine_type = line.split(":")[-1].strip()
+
+        return catalog_number, description, machine_type
+
+    except Exception as e:
+        print(f"[ERROR] Ошибка анализа изображения {file_url}: {e}")
+        return "UNKNOWN", "UNKNOWN", "UNKNOWN"
+
+# --- /analyze ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -82,26 +119,10 @@ def analyze():
     for f in files:
         file_id = f["id"]
         file_url = f["webViewLink"]
-        catalog_number = description = machine_type = "UNKNOWN"
 
-        try:
-            response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Ты эксперт по запчастям спецтехники."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "Определи каталожный номер, описание и технику для этой детали."},
-                        {"type": "image_url", "image_url": {"url": file_url}}
-                    ]}
-                ],
-                max_tokens=300
-            )
-            result_text = response.choices[0].message.content.strip()
-            catalog_number, description, machine_type = result_text, "-", "-"
-            print(f"[INFO] OpenAI ответ для {file_url}: {result_text}")
-        except Exception:
-            traceback.print_exc()
+        catalog_number, description, machine_type = analyze_image(openai_client, file_url)
 
+        # Перемещаем файл в analyzed
         try:
             file_info = drive_service.files().get(fileId=file_id, fields="parents").execute()
             prev_parents = ",".join(file_info.get("parents"))
@@ -115,18 +136,24 @@ def analyze():
         except Exception:
             traceback.print_exc()
 
+        # Добавляем в Google Sheets
         try:
             sheet.append_row([catalog_number, description, machine_type, file_url])
             print(f"[INFO] Строка для {f['name']} добавлена в Google Sheets")
         except Exception:
             traceback.print_exc()
 
-        processed.append({"file": f["name"], "catalog_number": catalog_number, "description": description, "machine_type": machine_type})
+        processed.append({
+            "file": f["name"],
+            "catalog_number": catalog_number,
+            "description": description,
+            "machine_type": machine_type
+        })
 
     return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
+# --- Запуск ---
 if __name__ == "__main__":
     check_requirements()
     port = int(os.getenv("PORT", 5000))
-    print(f"[INFO] Flask запускается на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
