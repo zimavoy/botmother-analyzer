@@ -10,6 +10,16 @@ app = Flask(__name__)
 
 REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
+HEADERS = [
+    "Catalog Number",
+    "Description",
+    "Machine Type",
+    "Manufacturer",
+    "Analogs",
+    "Detail Description",
+    "File URL",
+]
+
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -25,6 +35,22 @@ def get_google_services():
     )
     drive_service = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
+
+    # Проверка/обновление заголовков
+    try:
+        existing = sheet.row_values(1)
+        if not existing:
+            print("[INFO] Заголовки отсутствуют, добавляю...")
+            sheet.insert_row(HEADERS, 1)
+        elif existing != HEADERS:
+            print("[WARNING] Заголовки не совпадают, обновляю...")
+            sheet.delete_rows(1)
+            sheet.insert_row(HEADERS, 1)
+        else:
+            print("[INFO] Заголовки корректны.")
+    except Exception as e:
+        print(f"[ERROR] Ошибка при проверке заголовков: {e}")
+
     return drive_service, sheet
 
 def get_openai_client():
@@ -60,13 +86,9 @@ def analyze():
     for f in files:
         file_id, file_name = f["id"], f["name"]
 
-        # пробуем webContentLink, если нет — генерим вручную
-        file_url = f.get("webContentLink")
-        if not file_url:
-            file_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            print(f"[INFO] webContentLink не найден, сгенерирован {file_url}")
+        file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
 
-        catalog_number, description, machine_type = "UNKNOWN", "UNKNOWN", "UNKNOWN"
+        catalog_number = description = machine_type = manufacturer = analogs = detail_description = "UNKNOWN"
 
         try:
             print(f"[INFO] Анализ {file_name} ({file_url}) ...")
@@ -82,16 +104,19 @@ def analyze():
                                 "text": (
                                     "Проанализируй изображение детали и верни строго в формате:\n"
                                     "Catalog Number: <номер>\n"
-                                    "Description: <описание>\n"
-                                    "Machine Type: <тип техники>\n\n"
-                                    "Только три строки, без пояснений."
+                                    "Description: <короткое описание>\n"
+                                    "Machine Type: <тип техники>\n"
+                                    "Manufacturer: <производитель>\n"
+                                    "Analogs: <артикулы аналогов через запятую>\n"
+                                    "Detail Description: <текстовое описание детали>\n\n"
+                                    "Строго шесть строк, без пояснений и лишнего текста."
                                 ),
                             },
                             {"type": "image_url", "image_url": {"url": file_url}},
                         ],
                     },
                 ],
-                max_tokens=300,
+                max_tokens=400,
             )
 
             answer = resp.choices[0].message.content.strip()
@@ -104,6 +129,12 @@ def analyze():
                     description = line.split(":", 1)[1].strip()
                 elif line.lower().startswith("machine type"):
                     machine_type = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("manufacturer"):
+                    manufacturer = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("analogs"):
+                    analogs = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("detail description"):
+                    detail_description = line.split(":", 1)[1].strip()
 
         except Exception as e:
             print(f"[ERROR] Ошибка анализа {file_name}: {e}")
@@ -120,7 +151,7 @@ def analyze():
             traceback.print_exc()
 
         try:
-            sheet.append_row([catalog_number, description, machine_type, file_url])
+            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, file_url])
         except Exception:
             print(f"[ERROR] Не удалось записать строку для {file_name}")
             traceback.print_exc()
@@ -131,6 +162,9 @@ def analyze():
                 "catalog_number": catalog_number,
                 "description": description,
                 "machine_type": machine_type,
+                "manufacturer": manufacturer,
+                "analogs": analogs,
+                "detail_description": detail_description,
             }
         )
 
