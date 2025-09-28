@@ -14,35 +14,28 @@ REQUIRED_ENV_VARS = [
 ]
 
 def check_requirements():
-    print("[INFO] Проверка требований перед запуском приложения...")
-    missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
-    if missing_vars:
-        print(f"[WARNING] Отсутствуют переменные окружения: {', '.join(missing_vars)}")
+    print("[INFO] Проверка переменных окружения...")
+    missing = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing:
+        print(f"[WARNING] Отсутствуют переменные: {missing}")
     else:
-        print("[INFO] Все обязательные переменные окружения заданы.")
-
+        print("[INFO] Все обязательные переменные заданы.")
     if not os.path.exists("credentials.json"):
-        print("[WARNING] credentials.json не найден! Google API не будет работать до его добавления.")
+        print("[WARNING] credentials.json не найден!")
     else:
         print("[INFO] credentials.json найден.")
 
-# --- /ping эндпоинт ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
-# --- Ленивое подключение Google API ---
 def get_google_services():
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
     import gspread
 
-    creds_path = "credentials.json"
-    if not os.path.exists(creds_path):
-        raise FileNotFoundError("credentials.json не найден!")
-
     creds = Credentials.from_service_account_file(
-        creds_path,
+        "credentials.json",
         scopes=[
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/spreadsheets"
@@ -52,20 +45,17 @@ def get_google_services():
     drive_service = build("drive", "v3", credentials=creds)
     sheets_client = gspread.authorize(creds)
     sheet = sheets_client.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
-
-    print("[INFO] Google API подключены успешно.")
+    print("[INFO] Google API подключены")
     return drive_service, sheet
 
-# --- Ленивое подключение OpenAI ---
 def get_openai_client():
     from openai import OpenAI
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise ValueError("OPENAI_API_KEY не задан!")
-    print("[INFO] OpenAI клиент готов.")
-    return OpenAI(api_key=api_key)  # ✅ без proxies
+    print("[INFO] OpenAI клиент готов")
+    return OpenAI(api_key=api_key)  # ✅ только api_key, никаких proxies
 
-# --- /analyze эндпоинт ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -86,23 +76,21 @@ def analyze():
         ).execute()
         files = results.get("files", [])
     except Exception:
-        print("[ERROR] Ошибка получения списка файлов из Google Drive:")
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Не удалось получить файлы из Google Drive"}), 500
+        return jsonify({"status": "error", "message": "Ошибка получения файлов из Google Drive"}), 500
 
     for f in files:
         file_id = f["id"]
         file_url = f["webViewLink"]
         catalog_number = description = machine_type = "UNKNOWN"
 
-        # --- Анализ фото через OpenAI ---
         try:
             response = openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
+                    {"role": "system", "content": "Ты эксперт по запчастям спецтехники."},
                     {"role": "user", "content": [
-                        {"type": "text", "text": "Определи каталожный номер, описание и для какой техники подходит эта деталь."},
+                        {"type": "text", "text": "Определи каталожный номер, описание и технику для этой детали."},
                         {"type": "image_url", "image_url": {"url": file_url}}
                     ]}
                 ],
@@ -110,42 +98,33 @@ def analyze():
             )
             result_text = response.choices[0].message.content.strip()
             catalog_number, description, machine_type = result_text, "-", "-"
-            print(f"[INFO] OpenAI response для {file_url}: {result_text}")
+            print(f"[INFO] OpenAI ответ для {file_url}: {result_text}")
         except Exception:
-            print(f"[ERROR] Ошибка анализа фото {file_url}:")
             traceback.print_exc()
 
-        # --- Перенос файла в analyzed ---
         try:
             file_info = drive_service.files().get(fileId=file_id, fields="parents").execute()
-            previous_parents = ",".join(file_info.get("parents"))
+            prev_parents = ",".join(file_info.get("parents"))
             drive_service.files().update(
                 fileId=file_id,
                 addParents=ANALYZED_FOLDER_ID,
-                removeParents=previous_parents,
+                removeParents=prev_parents,
                 fields="id, parents"
             ).execute()
+            print(f"[INFO] Файл {f['name']} перемещен в analyzed")
         except Exception:
-            print(f"[ERROR] Ошибка перемещения файла {file_id}:")
             traceback.print_exc()
 
-        # --- Добавление строки в Google Sheets ---
         try:
             sheet.append_row([catalog_number, description, machine_type, file_url])
+            print(f"[INFO] Строка для {f['name']} добавлена в Google Sheets")
         except Exception:
-            print(f"[ERROR] Ошибка добавления строки для {file_url}:")
             traceback.print_exc()
 
-        processed.append({
-            "file": f["name"],
-            "catalog_number": catalog_number,
-            "description": description,
-            "machine_type": machine_type
-        })
+        processed.append({"file": f["name"], "catalog_number": catalog_number, "description": description, "machine_type": machine_type})
 
     return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
-# --- Запуск Flask ---
 if __name__ == "__main__":
     check_requirements()
     port = int(os.getenv("PORT", 5000))
