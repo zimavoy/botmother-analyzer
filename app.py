@@ -8,26 +8,18 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# --- Настройки окружения ---
-REQUIRED_ENV_VARS = [
-    "OPENAI_API_KEY",
-    "SPREADSHEET_ID",
-    "TO_ANALYZE_FOLDER_ID",
-    "ANALYZED_FOLDER_ID",
-]
+REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
 HEADERS = [
     "Catalog Number",
     "Description",
     "Machine Type",
-    "Machine Model",
     "Manufacturer",
     "Analogs",
     "Detail Description",
     "File URL",
 ]
 
-# --- Проверка окружения ---
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -35,10 +27,7 @@ def check_requirements():
         print(f"[WARNING] Не заданы: {', '.join(missing)}")
     if not os.path.exists("credentials.json"):
         print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
-    else:
-        print("[INFO] credentials.json найден.")
 
-# --- Подключение Google сервисов ---
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
@@ -47,14 +36,14 @@ def get_google_services():
     drive_service = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
 
-    # Проверяем/обновляем заголовки таблицы
+    # Проверка/обновление заголовков
     try:
         existing = sheet.row_values(1)
         if not existing:
-            print("[INFO] Заголовки отсутствуют — создаю...")
+            print("[INFO] Заголовки отсутствуют, добавляю...")
             sheet.insert_row(HEADERS, 1)
         elif existing != HEADERS:
-            print("[WARNING] Заголовки не совпадают — обновляю...")
+            print("[WARNING] Заголовки не совпадают, обновляю...")
             sheet.delete_rows(1)
             sheet.insert_row(HEADERS, 1)
         else:
@@ -64,20 +53,13 @@ def get_google_services():
 
     return drive_service, sheet
 
-# --- Подключение OpenAI ---
 def get_openai_client():
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY не задан!")
-    print("[INFO] OpenAI клиент инициализирован.")
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- Пинг ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
-# --- Основной анализ ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -99,48 +81,42 @@ def analyze():
         files = results.get("files", [])
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": f"Google Drive ошибка: {e}"}), 500
+        return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
 
     for f in files:
         file_id, file_name = f["id"], f["name"]
+
         file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
 
-        # Значения по умолчанию
-        catalog_number = description = machine_type = machine_model = manufacturer = analogs = detail_description = "UNKNOWN"
+        catalog_number = description = machine_type = manufacturer = analogs = detail_description = "UNKNOWN"
 
         try:
             print(f"[INFO] Анализ {file_name} ({file_url}) ...")
-
-            # --- Вызов OpenAI Vision ---
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "Ты — эксперт по запчастям строительной техники и каталогам деталей.",
-                    },
+                    {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "text",
                                 "text": (
-                                    "Проанализируй изображение детали спецтехники и верни строго в формате:\n"
-                                    "Catalog Number: <каталожный номер>\n"
-                                    "Description: <короткое описание детали>\n"
-                                    "Machine Type: <тип техники (например, экскаватор, погрузчик)>\n"
-                                    "Machine Model: <модель машины, для которой подходит деталь>\n"
+                                    "Проанализируй изображение детали и верни строго в формате:\n"
+                                    "Catalog Number: <номер>\n"
+                                    "Description: <короткое описание>\n"
+                                    "Machine Type: <тип техники>\n"
                                     "Manufacturer: <производитель>\n"
                                     "Analogs: <артикулы аналогов через запятую>\n"
-                                    "Detail Description: <текстовое описание назначения и особенностей детали>\n\n"
-                                    "Отвечай строго по шаблону — ровно 7 строк, без комментариев и лишнего текста."
+                                    "Detail Description: <текстовое описание детали>\n\n"
+                                    "Строго шесть строк, без пояснений и лишнего текста."
                                 ),
                             },
                             {"type": "image_url", "image_url": {"url": file_url}},
                         ],
                     },
                 ],
-                max_tokens=500,
+                max_tokens=400,
             )
 
             answer = resp.choices[0].message.content.strip()
@@ -153,8 +129,6 @@ def analyze():
                     description = line.split(":", 1)[1].strip()
                 elif line.lower().startswith("machine type"):
                     machine_type = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("machine model"):
-                    machine_model = line.split(":", 1)[1].strip()
                 elif line.lower().startswith("manufacturer"):
                     manufacturer = line.split(":", 1)[1].strip()
                 elif line.lower().startswith("analogs"):
@@ -166,27 +140,18 @@ def analyze():
             print(f"[ERROR] Ошибка анализа {file_name}: {e}")
             traceback.print_exc()
 
-        # --- Перемещение файла ---
         try:
             file_info = drive.files().get(fileId=file_id, fields="parents").execute()
-            prev_parents = ",".join(file_info.get("parents", []))
+            prev_parents = ",".join(file_info.get("parents"))
             drive.files().update(
-                fileId=file_id,
-                addParents=ANALYZED,
-                removeParents=prev_parents,
-                fields="id, parents",
+                fileId=file_id, addParents=ANALYZED, removeParents=prev_parents, fields="id, parents"
             ).execute()
-            print(f"[INFO] Файл {file_name} перемещён в analyzed.")
         except Exception:
             print(f"[ERROR] Не удалось переместить {file_name}")
             traceback.print_exc()
 
-        # --- Добавление строки в Google Sheets ---
         try:
-            sheet.append_row(
-                [catalog_number, description, machine_type, machine_model, manufacturer, analogs, detail_description, file_url]
-            )
-            print(f"[INFO] Добавлена строка в таблицу для {file_name}")
+            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, file_url])
         except Exception:
             print(f"[ERROR] Не удалось записать строку для {file_name}")
             traceback.print_exc()
@@ -197,7 +162,6 @@ def analyze():
                 "catalog_number": catalog_number,
                 "description": description,
                 "machine_type": machine_type,
-                "machine_model": machine_model,
                 "manufacturer": manufacturer,
                 "analogs": analogs,
                 "detail_description": detail_description,
@@ -205,7 +169,6 @@ def analyze():
         )
 
     return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
-
 
 if __name__ == "__main__":
     check_requirements()
