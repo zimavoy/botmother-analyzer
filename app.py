@@ -155,7 +155,7 @@ def analyze():
             traceback.print_exc()
 
         try:
-            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, file_url, machine_model])
+            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model, file_url])
         except Exception:
             print(f"[ERROR] Не удалось записать строку для {file_name}")
             traceback.print_exc()
@@ -180,4 +180,5 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Запуск Flask на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
