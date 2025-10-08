@@ -109,7 +109,8 @@ def analyze():
                                     "Manufacturer: <производитель>\n"
                                     "Analogs: <артикулы аналогов через запятую>\n"
                                     "Detail Description: <текстовое описание детали>\n\n"
-                                    "Строго шесть строк, без пояснений и лишнего текста."
+                                    "Machine Model: <текстовое описание модели>\n\n"
+                                    "Строго семь строк, без пояснений и лишнего текста. Ответ пиши на русском языке, где это возможно"
                                 ),
                             },
                             {"type": "image_url", "image_url": {"url": file_url}},
@@ -175,3 +176,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Запуск Flask на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
+
