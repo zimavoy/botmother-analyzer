@@ -17,6 +17,7 @@ HEADERS = [
     "Manufacturer",
     "Analogs",
     "Detail Description",
+    "Machine Model"
     "File URL",
 ]
 
@@ -88,7 +89,7 @@ def analyze():
 
         file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
 
-        catalog_number = description = machine_type = manufacturer = analogs = detail_description = "UNKNOWN"
+        catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
 
         try:
             print(f"[INFO] Анализ {file_name} ({file_url}) ...")
@@ -136,6 +137,8 @@ def analyze():
                     analogs = line.split(":", 1)[1].strip()
                 elif line.lower().startswith("detail description"):
                     detail_description = line.split(":", 1)[1].strip()
+                elif line.lower().startswith("machine model"):
+                    machine_model = line.split(":", 1)[1].strip()
 
         except Exception as e:
             print(f"[ERROR] Ошибка анализа {file_name}: {e}")
@@ -152,7 +155,7 @@ def analyze():
             traceback.print_exc()
 
         try:
-            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, file_url])
+            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, file_url, machine_model])
         except Exception:
             print(f"[ERROR] Не удалось записать строку для {file_name}")
             traceback.print_exc()
@@ -166,6 +169,7 @@ def analyze():
                 "manufacturer": manufacturer,
                 "analogs": analogs,
                 "detail_description": detail_description,
+                "machine model": machine_model,
             }
         )
 
