@@ -17,7 +17,7 @@ HEADERS = [
     "Manufacturer",
     "Analogs",
     "Detail Description",
-    "Machine Model"
+    "Machine Model",
     "File URL",
 ]
 
@@ -180,5 +180,6 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Запуск Flask на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
