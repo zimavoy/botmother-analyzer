@@ -1,5 +1,6 @@
 FROM python:3.11-slim
 
+# Системные зависимости для Pillow
 RUN apt-get update && apt-get install -y \
     build-essential \
     libjpeg-dev \
@@ -14,4 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 5000
 
+# Запуск приложения напрямую через Flask
 CMD ["python", "app.py"]
