@@ -1,5 +1,9 @@
 import os
+import gc
+import json
+import time
 import traceback
+import psutil
 from flask import Flask, jsonify
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -7,60 +11,58 @@ import gspread
 from openai import OpenAI
 
 app = Flask(__name__)
+app.config["JSON_AS_ASCII"] = False
 
-REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
-
-HEADERS = [
-    "Catalog Number",
-    "Description",
-    "Machine Type",
-    "Manufacturer",
-    "Analogs",
-    "Detail Description",
-    "Machine Model",
-    "File URL",
+# --- Обязательные переменные окружения ---
+REQUIRED_ENV_VARS = [
+    "OPENAI_API_KEY",
+    "SPREADSHEET_ID",
+    "TO_ANALYZE_FOLDER_ID",
+    "ANALYZED_FOLDER_ID",
 ]
 
+
+# --- Проверка окружения ---
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
-        print(f"[WARNING] Не заданы: {', '.join(missing)}")
+        print(f"[WARN] Нет переменных: {', '.join(missing)}")
     if not os.path.exists("credentials.json"):
-        print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
+        print("[WARN] credentials.json отсутствует!")
+    else:
+        print("[INFO] credentials.json найден.")
 
+
+# --- Подключение Google API ---
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
-        scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ],
     )
-    drive_service = build("drive", "v3", credentials=creds)
+    drive = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
+    return drive, sheet
 
-    # Проверка/обновление заголовков
-    try:
-        existing = sheet.row_values(1)
-        if not existing:
-            print("[INFO] Заголовки отсутствуют, добавляю...")
-            sheet.insert_row(HEADERS, 1)
-        elif existing != HEADERS:
-            print("[WARNING] Заголовки не совпадают, обновляю...")
-            sheet.delete_rows(1)
-            sheet.insert_row(HEADERS, 1)
-        else:
-            print("[INFO] Заголовки корректны.")
-    except Exception as e:
-        print(f"[ERROR] Ошибка при проверке заголовков: {e}")
 
-    return drive_service, sheet
-
+# --- Подключение OpenAI ---
 def get_openai_client():
-    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY не задан")
+    return OpenAI(api_key=api_key)
 
+
+# --- Проверка живости ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
+
+# --- Основной эндпоинт ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -72,114 +74,142 @@ def analyze():
 
     TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
     ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
-    processed = []
+    processed_total = []
 
+    # --- Получаем список всех изображений ---
     try:
-        results = drive.files().list(
-            q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
-            fields="files(id, name, webViewLink, webContentLink)",
-        ).execute()
-        files = results.get("files", [])
+        files = (
+            drive.files()
+            .list(
+                q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
+                fields="files(id, name, webViewLink)",
+                pageSize=1000
+            )
+            .execute()
+            .get("files", [])
+        )
+        print(f"[INFO] Найдено {len(files)} файлов для анализа.")
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
+        return jsonify({"status": "error", "message": "Ошибка получения файлов"}), 500
 
-    for f in files:
-        file_id, file_name = f["id"], f["name"]
+    # --- Пакетная обработка ---
+    batch_size = 5
+    for batch_index in range(0, len(files), batch_size):
+        batch = files[batch_index: batch_index + batch_size]
+        print(f"[INFO] Обработка пакета {batch_index // batch_size + 1} ({len(batch)} файлов)")
 
-        file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
+        processed_batch = []
 
-        catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
+        for f in batch:
+            file_id = f["id"]
+            file_name = f["name"]
+            file_url = f["webViewLink"]
 
-        try:
-            print(f"[INFO] Анализ {file_name} ({file_url}) ...")
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "Проанализируй изображение детали и верни строго в формате:\n"
-                                    "Catalog Number: <номер>\n"
-                                    "Description: <короткое описание>\n"
-                                    "Machine Type: <тип техники>\n"
-                                    "Manufacturer: <производитель>\n"
-                                    "Analogs: <артикулы аналогов через запятую>\n"
-                                    "Detail Description: <текстовое описание детали>\n\n"
-                                    "Machine Model: <текстовое описание модели>\n\n"
-                                    "Строго семь строк, без пояснений и лишнего текста. Ответ пиши на русском языке, где это возможно"
-                                ),
-                            },
-                            {"type": "image_url", "image_url": {"url": file_url}},
-                        ],
-                    },
-                ],
-                max_tokens=400,
-            )
-
-            answer = resp.choices[0].message.content.strip()
-            print(f"[DEBUG] Ответ модели:\n{answer}")
-
-            for line in answer.splitlines():
-                if line.lower().startswith("catalog number"):
-                    catalog_number = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("description"):
-                    description = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("machine type"):
-                    machine_type = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("manufacturer"):
-                    manufacturer = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("analogs"):
-                    analogs = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("detail description"):
-                    detail_description = line.split(":", 1)[1].strip()
-                elif line.lower().startswith("machine model"):
-                    machine_model = line.split(":", 1)[1].strip()
-
-        except Exception as e:
-            print(f"[ERROR] Ошибка анализа {file_name}: {e}")
-            traceback.print_exc()
-
-        try:
-            file_info = drive.files().get(fileId=file_id, fields="parents").execute()
-            prev_parents = ",".join(file_info.get("parents"))
-            drive.files().update(
-                fileId=file_id, addParents=ANALYZED, removeParents=prev_parents, fields="id, parents"
-            ).execute()
-        except Exception:
-            print(f"[ERROR] Не удалось переместить {file_name}")
-            traceback.print_exc()
-
-        try:
-            sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model, file_url])
-        except Exception:
-            print(f"[ERROR] Не удалось записать строку для {file_name}")
-            traceback.print_exc()
-
-        processed.append(
-            {
+            print(f"[INFO] Анализ файла: {file_name}")
+            result = {
                 "file": file_name,
-                "catalog_number": catalog_number,
-                "description": description,
-                "machine_type": machine_type,
-                "manufacturer": manufacturer,
-                "analogs": analogs,
-                "detail_description": detail_description,
-                "machine model": machine_model,
+                "catalog_number": "UNKNOWN",
+                "description": "UNKNOWN",
+                "manufacturer": "UNKNOWN",
+                "analogs": "UNKNOWN",
+                "machine_type": "UNKNOWN",
+                "model": "UNKNOWN"
             }
-        )
 
-    return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Ты — эксперт по запчастям строительной техники. "
+                                "На вход даётся фото запчасти. "
+                                "Нужно определить: "
+                                "1) Каталожный номер (catalog_number), "
+                                "2) Описание детали (description), "
+                                "3) Производителя (manufacturer), "
+                                "4) Аналогичные артикулы (analogs), "
+                                "5) Тип техники (machine_type), "
+                                "6) Модель машины (model). "
+                                "Ответ верни строго в JSON без текста вокруг."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Проанализируй эту деталь и верни JSON."},
+                                {"type": "image_url", "image_url": {"url": file_url}},
+                            ],
+                        },
+                    ],
+                    max_tokens=500,
+                )
 
+                reply = response.choices[0].message.content.strip()
+                print(f"[DEBUG] Ответ от OpenAI: {reply}")
+
+                try:
+                    data = json.loads(reply)
+                    for key in result.keys():
+                        result[key] = data.get(key, result[key])
+                except Exception:
+                    print(f"[WARN] Не удалось распарсить ответ как JSON: {reply[:100]}...")
+
+            except Exception:
+                print(f"[ERROR] Ошибка анализа {file_name}")
+                traceback.print_exc()
+
+            # --- Перемещение в analyzed ---
+            try:
+                parents = drive.files().get(fileId=file_id, fields="parents").execute().get("parents", [])
+                drive.files().update(
+                    fileId=file_id,
+                    addParents=ANALYZED,
+                    removeParents=",".join(parents),
+                    fields="id, parents"
+                ).execute()
+            except Exception:
+                print(f"[ERROR] Не удалось переместить {file_name}")
+                traceback.print_exc()
+
+            # --- Добавляем в Google Sheets ---
+            try:
+                sheet.append_row([
+                    result["catalog_number"],
+                    result["description"],
+                    result["manufacturer"],
+                    result["analogs"],
+                    result["machine_type"],
+                    result["model"],
+                    file_url,
+                ])
+                print(f"[INFO] {file_name} добавлен в таблицу.")
+            except Exception:
+                print(f"[ERROR] Ошибка записи {file_name}")
+                traceback.print_exc()
+
+            processed_batch.append(result)
+
+            # Очистка памяти после каждого файла
+            gc.collect()
+            mem = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            print(f"[MEM] RAM: {mem:.2f} MB")
+
+        processed_total.extend(processed_batch)
+
+        print(f"[INFO] Пакет {batch_index // batch_size + 1} завершён. Очистка памяти...")
+        gc.collect()
+        time.sleep(2)  # легкая пауза между пакетами
+
+    print(f"[DONE] Обработка завершена. Всего обработано: {len(processed_total)} файлов.")
+    return jsonify({"status": "done", "processed_count": len(processed_total), "processed": processed_total})
+
+
+# --- Точка входа ---
 if __name__ == "__main__":
     check_requirements()
     port = int(os.getenv("PORT", 5000))
-    print(f"[INFO] Запуск Flask на порту {port}...")
-    app.run(host="0.0.0.0", port=port, debug=True)
-
-
-
+    print(f"[INFO] Flask запускается на порту {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
