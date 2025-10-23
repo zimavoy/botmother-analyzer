@@ -2,14 +2,13 @@ import os
 import traceback
 import time
 import base64
-import requests
 from io import BytesIO
 from flask import Flask, jsonify
 from PIL import Image
 
 app = Flask(__name__)
 
-# --- Обязательные переменные окружения ---
+# --- Переменные окружения ---
 REQUIRED_ENV_VARS = [
     "OPENAI_API_KEY",
     "SPREADSHEET_ID",
@@ -26,25 +25,6 @@ def check_requirements():
         print("[ERROR] credentials.json не найден!")
     else:
         print("[INFO] credentials.json найден.")
-
-# --- Конвертация изображения в Base64 PNG ---
-def get_image_base64(url):
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        img = Image.open(BytesIO(response.content))
-        if img.format.lower() not in ["png", "jpeg", "jpg", "gif", "webp"]:
-            print(f"[INFO] Конвертация изображения {url} → PNG")
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            buf.seek(0)
-            data = buf.read()
-        else:
-            data = response.content
-        return "data:image/png;base64," + base64.b64encode(data).decode("utf-8")
-    except Exception as e:
-        print(f"[ERROR] Не удалось обработать изображение {url}: {e}")
-        return None
 
 # --- Google API ---
 def get_google_services():
@@ -64,6 +44,32 @@ def get_google_services():
     sheets = gspread.authorize(creds)
     sheet = sheets.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
     return drive, sheet
+
+# --- Скачивание файла через Google Drive API ---
+def download_drive_file(drive_service, file_id):
+    from googleapiclient.http import MediaIoBaseDownload
+    fh = BytesIO()
+    request = drive_service.files().get_media(fileId=file_id)
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+    return fh.read()
+
+# --- Конвертация изображения в Base64 PNG ---
+def convert_to_base64(image_bytes):
+    try:
+        img = Image.open(BytesIO(image_bytes))
+        if img.format.lower() not in ["png", "jpeg", "jpg", "gif", "webp"]:
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            image_bytes = buf.read()
+        return "data:image/png;base64," + base64.b64encode(image_bytes).decode("utf-8")
+    except Exception as e:
+        print(f"[ERROR] Конвертация изображения не удалась: {e}")
+        return None
 
 # --- OpenAI ---
 def get_openai_client():
@@ -110,14 +116,15 @@ def analyze():
         for f in batch:
             file_id = f["id"]
             name = f["name"]
-            # Прямая ссылка на скачивание
-            file_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-
-            print(f"[INFO] Анализ файла {name}")
-
-            image_b64 = get_image_base64(file_url)
-            if not image_b64:
-                print(f"[WARN] Файл {name} пропущен")
+            print(f"[INFO] Скачиваем файл {name}")
+            try:
+                image_bytes = download_drive_file(drive, file_id)
+                image_b64 = convert_to_base64(image_bytes)
+                if not image_b64:
+                    print(f"[WARN] Пропускаем {name}, не удалось подготовить изображение")
+                    continue
+            except Exception as e:
+                print(f"[ERROR] Ошибка скачивания {name}: {e}")
                 continue
 
             catalog_number = description = manufacturer = analogs = machine_model = "UNKNOWN"
@@ -143,7 +150,6 @@ def analyze():
                 result_text = response.choices[0].message.content.strip()
                 print(f"[INFO] Ответ OpenAI: {result_text}")
 
-                # Простейшее извлечение значений из JSON
                 import json
                 try:
                     data = json.loads(result_text)
@@ -154,14 +160,13 @@ def analyze():
                     machine_model = data.get("machine_model", "UNKNOWN")
                 except Exception:
                     print("[WARN] Не удалось распарсить JSON, оставляем UNKNOWN")
-
             except Exception as e:
                 print(f"[ERROR] OpenAI анализ не удался: {e}")
 
-            # Перемещаем файл в папку analyzed
+            # Перемещаем файл в analyzed
             try:
-                file_info = drive.files().get(fileId=file_id, fields="parents").execute()
-                prev_parents = ",".join(file_info.get("parents", []))
+                info = drive.files().get(fileId=file_id, fields="parents").execute()
+                prev_parents = ",".join(info.get("parents", []))
                 drive.files().update(
                     fileId=file_id,
                     addParents=analyzed,
@@ -174,7 +179,7 @@ def analyze():
 
             # Записываем в Google Sheets
             try:
-                sheet.append_row([catalog_number, description, manufacturer, analogs, machine_model, file_url])
+                sheet.append_row([catalog_number, description, manufacturer, analogs, machine_model, name])
             except Exception as e:
                 print(f"[ERROR] Не удалось добавить строку в Sheets: {e}")
 
