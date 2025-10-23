@@ -17,7 +17,6 @@ REQUIRED_ENV_VARS = [
     "ANALYZED_FOLDER_ID"
 ]
 
-
 def check_requirements():
     print("[INFO] Проверка требований...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -28,15 +27,12 @@ def check_requirements():
     else:
         print("[INFO] credentials.json найден.")
 
-
 # --- Конвертация изображения в Base64 PNG ---
 def get_image_base64(url):
     try:
         response = requests.get(url, timeout=15)
         response.raise_for_status()
         img = Image.open(BytesIO(response.content))
-
-        # Приводим к PNG при необходимости
         if img.format.lower() not in ["png", "jpeg", "jpg", "gif", "webp"]:
             print(f"[INFO] Конвертация изображения {url} → PNG")
             buf = BytesIO()
@@ -45,13 +41,10 @@ def get_image_base64(url):
             data = buf.read()
         else:
             data = response.content
-
         return "data:image/png;base64," + base64.b64encode(data).decode("utf-8")
-
     except Exception as e:
         print(f"[ERROR] Не удалось обработать изображение {url}: {e}")
         return None
-
 
 # --- Google API ---
 def get_google_services():
@@ -72,19 +65,16 @@ def get_google_services():
     sheet = sheets.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
     return drive, sheet
 
-
 # --- OpenAI ---
 def get_openai_client():
     from openai import OpenAI
     api_key = os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key)
 
-
 # --- /ping ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok"})
-
 
 # --- /analyze ---
 @app.route("/analyze", methods=["POST"])
@@ -102,9 +92,10 @@ def analyze():
     try:
         results = drive.files().list(
             q=f"'{to_analyze}' in parents and mimeType contains 'image/'",
-            fields="files(id, name, webViewLink)"
+            fields="files(id, name)"
         ).execute()
         files = results.get("files", [])
+        print(f"[INFO] Найдено файлов для анализа: {len(files)}")
     except Exception as e:
         print(f"[ERROR] Не удалось получить список файлов: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -114,15 +105,22 @@ def analyze():
 
     for i in range(0, len(files), batch_size):
         batch = files[i:i + batch_size]
-        print(f"[INFO] Обработка пакета {i // batch_size + 1} из {len(files) // batch_size + 1}...")
+        print(f"[INFO] Обработка пакета {i // batch_size + 1}...")
 
         for f in batch:
-            file_id, name, link = f["id"], f["name"], f["webViewLink"]
-            print(f"[INFO] Анализ {name}")
+            file_id = f["id"]
+            name = f["name"]
+            # Прямая ссылка на скачивание
+            file_url = f"https://drive.google.com/uc?export=download&id={file_id}"
 
-            image_b64 = get_image_base64(link)
+            print(f"[INFO] Анализ файла {name}")
+
+            image_b64 = get_image_base64(file_url)
             if not image_b64:
+                print(f"[WARN] Файл {name} пропущен")
                 continue
+
+            catalog_number = description = manufacturer = analogs = machine_model = "UNKNOWN"
 
             try:
                 response = openai_client.chat.completions.create(
@@ -133,13 +131,7 @@ def analyze():
                             {
                                 "type": "text",
                                 "text": (
-                                    "Проанализируй фото и определи: "
-                                    "1. Каталожный номер детали\n"
-                                    "2. Описание детали\n"
-                                    "3. Производитель\n"
-                                    "4. Артикулы аналогов\n"
-                                    "5. Модель машины, для которой подходит деталь\n"
-                                    "Ответ верни в JSON формате с полями: "
+                                    "Проанализируй фото и верни JSON с полями: "
                                     "catalog_number, description, manufacturer, analogs, machine_model."
                                 )
                             },
@@ -148,40 +140,43 @@ def analyze():
                     ],
                     max_tokens=600
                 )
+                result_text = response.choices[0].message.content.strip()
+                print(f"[INFO] Ответ OpenAI: {result_text}")
 
-                result = response.choices[0].message.content.strip()
-                print(f"[INFO] Ответ модели:\n{result}")
-
-                # Простая попытка извлечь значения
-                catalog_number = description = manufacturer = analogs = machine_model = "UNKNOWN"
-                for key in ["catalog_number", "description", "manufacturer", "analogs", "machine_model"]:
-                    if key in result:
-                        start = result.find(key) + len(key) + 2
-                        end = result.find("\n", start)
-                        value = result[start:end].strip().strip('"').strip(",")
-                        locals()[key] = value
+                # Простейшее извлечение значений из JSON
+                import json
+                try:
+                    data = json.loads(result_text)
+                    catalog_number = data.get("catalog_number", "UNKNOWN")
+                    description = data.get("description", "UNKNOWN")
+                    manufacturer = data.get("manufacturer", "UNKNOWN")
+                    analogs = data.get("analogs", "UNKNOWN")
+                    machine_model = data.get("machine_model", "UNKNOWN")
+                except Exception:
+                    print("[WARN] Не удалось распарсить JSON, оставляем UNKNOWN")
 
             except Exception as e:
-                print(f"[ERROR] Ошибка анализа {name}: {e}")
-                continue
+                print(f"[ERROR] OpenAI анализ не удался: {e}")
 
+            # Перемещаем файл в папку analyzed
             try:
-                # Перемещаем файл в папку analyzed
-                info = drive.files().get(fileId=file_id, fields="parents").execute()
-                prev_parents = ",".join(info.get("parents", []))
+                file_info = drive.files().get(fileId=file_id, fields="parents").execute()
+                prev_parents = ",".join(file_info.get("parents", []))
                 drive.files().update(
                     fileId=file_id,
                     addParents=analyzed,
                     removeParents=prev_parents,
                     fields="id, parents"
                 ).execute()
+                print(f"[INFO] Файл {name} перемещён в analyzed")
             except Exception as e:
-                print(f"[ERROR] Ошибка переноса {name}: {e}")
+                print(f"[ERROR] Не удалось переместить {name}: {e}")
 
+            # Записываем в Google Sheets
             try:
-                sheet.append_row([catalog_number, description, manufacturer, analogs, machine_model, link])
+                sheet.append_row([catalog_number, description, manufacturer, analogs, machine_model, file_url])
             except Exception as e:
-                print(f"[ERROR] Ошибка записи в таблицу: {e}")
+                print(f"[ERROR] Не удалось добавить строку в Sheets: {e}")
 
             processed.append({
                 "file": name,
@@ -192,7 +187,6 @@ def analyze():
                 "machine_model": machine_model
             })
 
-        # задержка между батчами
         print("[INFO] Пауза 10 секунд перед следующим пакетом...")
         time.sleep(10)
 
@@ -201,7 +195,6 @@ def analyze():
         "processed_count": len(processed),
         "processed": processed
     })
-
 
 if __name__ == "__main__":
     check_requirements()
