@@ -17,14 +17,12 @@ REQUIRED_ENV_VARS = [
 ]
 
 def check_requirements():
-    print("[INFO] Проверка требований...")
+    print("[INFO] Проверка обязательных переменных окружения и credentials...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
         print(f"[ERROR] Не заданы переменные окружения: {', '.join(missing)}")
     if not os.path.exists("credentials.json"):
         print("[ERROR] credentials.json не найден!")
-    else:
-        print("[INFO] credentials.json найден.")
 
 # --- Google API ---
 def get_google_services():
@@ -67,6 +65,8 @@ def convert_to_base64_from_url(url):
 def get_openai_client():
     from openai import OpenAI
     api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY не задан!")
     return OpenAI(api_key=api_key)
 
 @app.route("/ping", methods=["GET"])
@@ -105,8 +105,6 @@ def analyze():
         for f in batch:
             file_id = f["id"]
             name = f["name"]
-            webview_url = f["webViewLink"]
-            # Прямая ссылка для скачивания
             file_url = f"https://drive.google.com/uc?export=download&id={file_id}"
             print(f"[INFO] Анализ файла {name}")
 
@@ -148,7 +146,7 @@ def analyze():
             except Exception as e:
                 print(f"[ERROR] OpenAI анализ не удался: {e}")
 
-            # Перемещение файла
+            # Перемещение файла в analyzed
             try:
                 file_info = drive.files().get(fileId=file_id, fields="parents").execute()
                 prev_parents = ",".join(file_info.get("parents", []))
