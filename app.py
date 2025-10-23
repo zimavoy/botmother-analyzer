@@ -2,13 +2,13 @@ import os
 import traceback
 import time
 import base64
+import requests
 from io import BytesIO
 from flask import Flask, jsonify
 from PIL import Image
 
 app = Flask(__name__)
 
-# --- Переменные окружения ---
 REQUIRED_ENV_VARS = [
     "OPENAI_API_KEY",
     "SPREADSHEET_ID",
@@ -45,30 +45,22 @@ def get_google_services():
     sheet = sheets.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
     return drive, sheet
 
-# --- Скачивание файла через Google Drive API ---
-def download_drive_file(drive_service, file_id):
-    from googleapiclient.http import MediaIoBaseDownload
-    fh = BytesIO()
-    request = drive_service.files().get_media(fileId=file_id)
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    fh.seek(0)
-    return fh.read()
-
-# --- Конвертация изображения в Base64 PNG ---
-def convert_to_base64(image_bytes):
+# --- Конвертация изображения в Base64 ---
+def convert_to_base64_from_url(url):
     try:
-        img = Image.open(BytesIO(image_bytes))
+        response = requests.get(url, timeout=20)
+        response.raise_for_status()
+        img = Image.open(BytesIO(response.content))
         if img.format.lower() not in ["png", "jpeg", "jpg", "gif", "webp"]:
             buf = BytesIO()
             img.save(buf, format="PNG")
             buf.seek(0)
-            image_bytes = buf.read()
-        return "data:image/png;base64," + base64.b64encode(image_bytes).decode("utf-8")
+            data = buf.read()
+        else:
+            data = response.content
+        return "data:image/png;base64," + base64.b64encode(data).decode("utf-8")
     except Exception as e:
-        print(f"[ERROR] Конвертация изображения не удалась: {e}")
+        print(f"[ERROR] Не удалось скачать/конвертировать изображение {url}: {e}")
         return None
 
 # --- OpenAI ---
@@ -77,12 +69,10 @@ def get_openai_client():
     api_key = os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key)
 
-# --- /ping ---
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok"})
 
-# --- /analyze ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -98,7 +88,7 @@ def analyze():
     try:
         results = drive.files().list(
             q=f"'{to_analyze}' in parents and mimeType contains 'image/'",
-            fields="files(id, name)"
+            fields="files(id, name, webViewLink)"
         ).execute()
         files = results.get("files", [])
         print(f"[INFO] Найдено файлов для анализа: {len(files)}")
@@ -112,19 +102,17 @@ def analyze():
     for i in range(0, len(files), batch_size):
         batch = files[i:i + batch_size]
         print(f"[INFO] Обработка пакета {i // batch_size + 1}...")
-
         for f in batch:
             file_id = f["id"]
             name = f["name"]
-            print(f"[INFO] Скачиваем файл {name}")
-            try:
-                image_bytes = download_drive_file(drive, file_id)
-                image_b64 = convert_to_base64(image_bytes)
-                if not image_b64:
-                    print(f"[WARN] Пропускаем {name}, не удалось подготовить изображение")
-                    continue
-            except Exception as e:
-                print(f"[ERROR] Ошибка скачивания {name}: {e}")
+            webview_url = f["webViewLink"]
+            # Прямая ссылка для скачивания
+            file_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            print(f"[INFO] Анализ файла {name}")
+
+            image_b64 = convert_to_base64_from_url(file_url)
+            if not image_b64:
+                print(f"[WARN] Файл {name} пропущен")
                 continue
 
             catalog_number = description = manufacturer = analogs = machine_model = "UNKNOWN"
@@ -135,13 +123,10 @@ def analyze():
                     messages=[
                         {"role": "system", "content": "Ты эксперт по запчастям спецтехники."},
                         {"role": "user", "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "Проанализируй фото и верни JSON с полями: "
-                                    "catalog_number, description, manufacturer, analogs, machine_model."
-                                )
-                            },
+                            {"type": "text", "text": (
+                                "Проанализируй фото и верни JSON с полями: "
+                                "catalog_number, description, manufacturer, analogs, machine_model."
+                            )},
                             {"type": "image_url", "image_url": {"url": image_b64}}
                         ]}
                     ],
@@ -163,10 +148,10 @@ def analyze():
             except Exception as e:
                 print(f"[ERROR] OpenAI анализ не удался: {e}")
 
-            # Перемещаем файл в analyzed
+            # Перемещение файла
             try:
-                info = drive.files().get(fileId=file_id, fields="parents").execute()
-                prev_parents = ",".join(info.get("parents", []))
+                file_info = drive.files().get(fileId=file_id, fields="parents").execute()
+                prev_parents = ",".join(file_info.get("parents", []))
                 drive.files().update(
                     fileId=file_id,
                     addParents=analyzed,
@@ -177,7 +162,7 @@ def analyze():
             except Exception as e:
                 print(f"[ERROR] Не удалось переместить {name}: {e}")
 
-            # Записываем в Google Sheets
+            # Запись в Google Sheets
             try:
                 sheet.append_row([catalog_number, description, manufacturer, analogs, machine_model, name])
             except Exception as e:
