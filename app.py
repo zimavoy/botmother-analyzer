@@ -293,6 +293,7 @@ def analyze():
 
 if __name__ == "__main__":
     check_requirements()
-    port = int(os.getenv("PORT", 5000, 5000))
+    port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
