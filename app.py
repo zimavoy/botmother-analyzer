@@ -22,8 +22,9 @@ HEADERS = [
 progress_log = []
 progress_percent = 0
 done_flag = False
+current_model = "gpt-4o-mini"
+remaining_tokens = None  # для отображения оставшегося лимита
 
-# Проверка окружения
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -32,7 +33,6 @@ def check_requirements():
     if not os.path.exists("credentials.json"):
         print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
 
-# Google API
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
@@ -51,32 +51,81 @@ def get_google_services():
 
     return drive_service, sheet
 
-# OpenAI
 def get_openai_client():
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# UI
 @app.route("/")
 def index():
     return render_template("index.html")
 
-# API для прогресса
 @app.route("/progress", methods=["GET"])
 def get_progress():
-    return jsonify({"percent": progress_percent, "log": progress_log, "done": done_flag})
+    return jsonify({
+        "percent": progress_percent, 
+        "log": progress_log, 
+        "done": done_flag, 
+        "current_model": current_model, 
+        "remaining_tokens": remaining_tokens
+    })
 
-# API для запуска анализа
 @app.route("/start", methods=["POST"])
 def start_analysis():
-    global progress_log, progress_percent, done_flag
+    global progress_log, progress_percent, done_flag, current_model, remaining_tokens
     progress_log = []
     progress_percent = 0
     done_flag = False
+    current_model = "gpt-4o-mini"
+    remaining_tokens = None
 
     threading.Thread(target=background_analysis).start()
     return jsonify({"status": "started"})
 
-# Фоновый анализ
+def analyze_file(client, file_name, file_url):
+    global current_model, remaining_tokens
+    catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
+    try:
+        progress_log.append(f"Анализ {file_name} моделью {current_model}")
+        resp = client.chat.completions.create(
+            model=current_model,
+            messages=[
+                {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": (
+                        "Проанализируй изображение и верни строго:\n"
+                        "Catalog Number: <номер>\n"
+                        "Description: <короткое описание>\n"
+                        "Machine Type: <тип техники>\n"
+                        "Manufacturer: <производитель>\n"
+                        "Analogs: <артикулы через запятую>\n"
+                        "Detail Description: <текстовое описание>\n"
+                        "Machine Model: <модель>\n"
+                    )},
+                    {"type": "image_url", "image_url": {"url": file_url}}
+                ]}
+            ],
+            max_tokens=400,
+        )
+        answer = resp.choices[0].message.content.strip()
+        # обновляем лимит токенов (пример, если API возвращает remaining_tokens)
+        remaining_tokens = getattr(resp, "usage", {}).get("total_tokens", None)
+
+        for line in answer.splitlines():
+            if line.lower().startswith("catalog number"): catalog_number = line.split(":",1)[1].strip()
+            elif line.lower().startswith("description"): description = line.split(":",1)[1].strip()
+            elif line.lower().startswith("machine type"): machine_type = line.split(":",1)[1].strip()
+            elif line.lower().startswith("manufacturer"): manufacturer = line.split(":",1)[1].strip()
+            elif line.lower().startswith("analogs"): analogs = line.split(":",1)[1].strip()
+            elif line.lower().startswith("detail description"): detail_description = line.split(":",1)[1].strip()
+            elif line.lower().startswith("machine model"): machine_model = line.split(":",1)[1].strip()
+
+    except Exception as e:
+        progress_log.append(f"[ERROR] {file_name}: {e}")
+        if "limit" in str(e).lower() and current_model == "gpt-4o-mini":
+            progress_log.append(f"[INFO] Лимит GPT-4 исчерпан. Переключаемся на GPT-3.5")
+            current_model = "gpt-3.5-mini"
+            return analyze_file(client, file_name, file_url)
+    return [catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model]
+
 def background_analysis():
     global progress_log, progress_percent, done_flag
     drive, sheet = get_google_services()
@@ -98,54 +147,13 @@ def background_analysis():
     batch_size = 5
     total = len(files)
 
+    # Основной анализ
     for i in range(0, total, batch_size):
         batch = files[i:i+batch_size]
         for f in batch:
             file_id, file_name = f["id"], f["name"]
             file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
-
-            catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
-            model_used = "gpt-4o-mini"
-
-            try:
-                progress_log.append(f"Анализ {file_name} моделью {model_used}")
-                resp = client.chat.completions.create(
-                    model=model_used,
-                    messages=[
-                        {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
-                        {"role": "user", "content": [
-                            {"type": "text", "text": (
-                                "Проанализируй изображение и верни строго:\n"
-                                "Catalog Number: <номер>\n"
-                                "Description: <короткое описание>\n"
-                                "Machine Type: <тип техники>\n"
-                                "Manufacturer: <производитель>\n"
-                                "Analogs: <артикулы через запятую>\n"
-                                "Detail Description: <текстовое описание>\n"
-                                "Machine Model: <модель>\n"
-                            )},
-                            {"type": "image_url", "image_url": {"url": file_url}}
-                        ]}
-                    ],
-                    max_tokens=400,
-                )
-
-                answer = resp.choices[0].message.content.strip()
-                for line in answer.splitlines():
-                    if line.lower().startswith("catalog number"): catalog_number = line.split(":",1)[1].strip()
-                    elif line.lower().startswith("description"): description = line.split(":",1)[1].strip()
-                    elif line.lower().startswith("machine type"): machine_type = line.split(":",1)[1].strip()
-                    elif line.lower().startswith("manufacturer"): manufacturer = line.split(":",1)[1].strip()
-                    elif line.lower().startswith("analogs"): analogs = line.split(":",1)[1].strip()
-                    elif line.lower().startswith("detail description"): detail_description = line.split(":",1)[1].strip()
-                    elif line.lower().startswith("machine model"): machine_model = line.split(":",1)[1].strip()
-
-            except Exception as e:
-                progress_log.append(f"[ERROR] {file_name}: {e}")
-                if "limit" in str(e).lower():
-                    progress_log.append(f"[INFO] Лимит исчерпан. Переключаемся на GPT-3.5")
-                    model_used = "gpt-3.5-mini"
-                    continue
+            result = analyze_file(client, file_name, file_url)
 
             # Перенос файла
             try:
@@ -159,17 +167,29 @@ def background_analysis():
 
             # Запись в Google Sheets
             try:
-                sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model, file_url])
+                sheet.append_row(result + [file_url])
             except Exception:
                 progress_log.append(f"[ERROR] Не удалось записать {file_name}")
 
         progress_percent = int((i + len(batch)) / total * 100)
-        time.sleep(1)  # небольшая пауза для безопасности
+        time.sleep(1)
+
+    # Повтор анализа для файлов с UNKNOWN
+    progress_log.append("[INFO] Повтор анализа для файлов с UNKNOWN...")
+    all_rows = sheet.get_all_values()[1:]  # исключаем заголовок
+    for idx, row in enumerate(all_rows, start=2):
+        if "UNKNOWN" in row:
+            file_url = row[-1]
+            new_result = analyze_file(client, f"Повтор {idx}", file_url)
+            try:
+                sheet.delete_rows(idx)
+                sheet.insert_row(new_result + [file_url], idx)
+            except Exception:
+                progress_log.append(f"[ERROR] Не удалось обновить строку {idx}")
 
     progress_percent = 100
     done_flag = True
     progress_log.append("Анализ завершён!")
-    
 
 if __name__ == "__main__":
     check_requirements()
