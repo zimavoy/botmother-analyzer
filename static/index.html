@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Analyzer UI</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; padding: 24px; color:#111 }
+    button { padding: 10px 16px; font-size:16px; }
+    #progressBox { margin-top:20px; width:100%; max-width:700px; }
+    #barWrap { background:#eee; border-radius:6px; overflow:hidden; height:24px; }
+    #bar { height:24px; width:0%; background:linear-gradient(90deg,#28a745,#85e89d); transition: width .4s; }
+    #info { margin-top:8px; font-size:14px; color:#333; }
+    a.sheet { display:inline-block; margin-top:10px; color:#0b66c3; }
+  </style>
+</head>
+<body>
+  <h1>Analyzer</h1>
+  <p>Нажмите кнопку ниже, чтобы запустить анализ (пакетная обработка, прогресс-бар)</p>
+
+  <form id="startForm" action="/start" method="post">
+    <button id="startBtn" type="submit">▶ Запустить анализ</button>
+  </form>
+
+  <div id="progressBox" style="display:none;">
+    <div id="barWrap"><div id="bar"></div></div>
+    <div id="info">Готово к запуску</div>
+    <div id="sheetLink" style="margin-top:8px;"></div>
+  </div>
+
+<script>
+const startForm = document.getElementById('startForm');
+const progressBox = document.getElementById('progressBox');
+const bar = document.getElementById('bar');
+const info = document.getElementById('info');
+const sheetLink = document.getElementById('sheetLink');
+let pollId = null;
+
+startForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  // start analysis via API
+  const resp = await fetch('/start', { method: 'POST' });
+  const j = await resp.json();
+  if (resp.status === 202 || resp.status === 200) {
+    progressBox.style.display = 'block';
+    info.textContent = 'Запущен анализ...';
+    startPolling();
+  } else if (resp.status === 409) {
+    progressBox.style.display = 'block';
+    info.textContent = 'Анализ уже запущен, отслеживаем...';
+    startPolling();
+  } else {
+    info.textContent = 'Ошибка при запуске: ' + (j.message || JSON.stringify(j));
+  }
+});
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/status');
+    const j = await r.json();
+    const total = j.total || 0;
+    const processed = j.processed || 0;
+    const state = j.state || 'idle';
+    const last = j.last_message || '';
+    if (total > 0) {
+      const pct = Math.round((processed / total) * 100);
+      bar.style.width = pct + '%';
+      info.textContent = `${processed} из ${total} обработано — ${state}. ${last}`;
+    } else {
+      info.textContent = `Ожидание файлов... ${state}`;
+      bar.style.width = '0%';
+    }
+    if (j.sheet_url) {
+      sheetLink.innerHTML = `<a class="sheet" href="${j.sheet_url}" target="_blank">Открыть Google Sheet</a>`;
+    }
+    if (state === 'done' || state === 'error') {
+      stopPolling();
+      if (state === 'done') {
+        info.textContent = `Готово! ${j.result_summary || ''}`;
+      } else {
+        info.textContent = `Ошибка: ${j.last_message || 'см. логи'}`;
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    info.textContent = 'Ошибка получения статуса (проверь логи).';
+  }
+}
+
+function startPolling() {
+  if (pollId) return;
+  fetchStatus();
+  pollId = setInterval(fetchStatus, 1500);
+}
+
+function stopPolling() {
+  if (!pollId) return;
+  clearInterval(pollId);
+  pollId = null;
+}
+</script>
+</body>
+</html>
