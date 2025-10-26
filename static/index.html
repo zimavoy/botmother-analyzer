@@ -2,50 +2,53 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<title>Анализ запчастей</title>
+<title>Анализ деталей</title>
 <style>
-  body { font-family: Arial, sans-serif; margin: 20px; }
-  button { padding: 10px 20px; font-size: 16px; }
-  #progress { margin-top: 20px; width: 100%; background: #eee; border-radius: 5px; overflow: hidden; }
-  #bar { width: 0; height: 24px; background: #4caf50; text-align: center; color: white; }
-  #log { margin-top: 20px; height: 300px; overflow-y: scroll; border: 1px solid #ccc; padding: 10px; background: #f9f9f9; }
+  body { font-family: Arial; margin: 20px; }
+  #progress-bar { width: 100%; background-color: #eee; height: 20px; border-radius: 5px; overflow: hidden; margin-bottom: 10px; }
+  #progress { height: 100%; width: 0%; background-color: #4caf50; }
+  pre { background: #f4f4f4; padding: 10px; max-height: 200px; overflow-y: auto; margin-bottom: 10px; }
 </style>
 </head>
 <body>
-<h1>Анализ запчастей</h1>
-<button id="startBtn">Запустить анализ</button>
-<div id="progress"><div id="bar">0%</div></div>
-<div id="log"></div>
+<h1>Анализ деталей</h1>
+<button onclick="startAnalysis()">Запустить анализ</button>
+<p>Текущая модель: <span id="current-model">-</span></p>
+<p>Оставшийся лимит токенов: <span id="remaining-tokens">-</span></p>
+<div id="progress-bar"><div id="progress"></div></div>
+
+<h2>Лог основного анализа</h2>
+<pre id="log-main"></pre>
+
+<h2>Лог повторного анализа (UNKNOWN)</h2>
+<pre id="log-retry"></pre>
 
 <script>
-const startBtn = document.getElementById('startBtn');
-const bar = document.getElementById('bar');
-const log = document.getElementById('log');
+let interval;
 
-startBtn.onclick = async () => {
-    log.innerHTML = '';
-    bar.style.width = '0%';
-    bar.textContent = '0%';
+function startAnalysis() {
+    fetch("/start", {method: "POST"})
+    .then(res => res.json())
+    .then(data => {
+        if(data.status === "started") {
+            interval = setInterval(updateProgress, 1000);
+        }
+    });
+}
 
-    const response = await fetch('/start', { method: 'POST' });
-    const data = await response.json();
+function updateProgress() {
+    fetch("/progress")
+    .then(res => res.json())
+    .then(data => {
+        document.getElementById("current-model").innerText = data.current_model;
+        document.getElementById("remaining-tokens").innerText = data.remaining_tokens || "-";
+        document.getElementById("log-main").innerText = data.main_log.join("\n");
+        document.getElementById("log-retry").innerText = data.retry_log.join("\n");
+        document.getElementById("progress").style.width = data.percent + "%";
 
-    if(data.status === 'started') {
-        const interval = setInterval(async () => {
-            const progressRes = await fetch('/progress');
-            const progressData = await progressRes.json();
-            
-            bar.style.width = progressData.percent + '%';
-            bar.textContent = progressData.percent + '%';
-
-            log.innerHTML = progressData.log.join('<br>');
-
-            if(progressData.done) clearInterval(interval);
-        }, 1000);
-    } else {
-        alert('Не удалось запустить анализ: ' + data.message);
-    }
-};
+        if(data.done) clearInterval(interval);
+    });
+}
 </script>
 </body>
 </html>
