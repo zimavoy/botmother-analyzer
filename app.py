@@ -1,30 +1,38 @@
 import os
 import traceback
-import json
-import smtplib
-from email.mime.text import MIMEText
-from flask import Flask, jsonify, render_template_string
+import threading
+import time
+from flask import Flask, jsonify, render_template
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 from openai import OpenAI
-import time
 
-app = Flask(__name__)
+app = Flask(__name__, static_url_path='', static_folder='static', template_folder='templates')
 
-REQUIRED_ENV_VARS = [
-    "OPENAI_API_KEY", "SPREADSHEET_ID", 
-    "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID", 
-    "REPORT_EMAIL"
-]
+REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
 HEADERS = [
-    "Catalog Number", "Description", "Machine Type", 
-    "Manufacturer", "Analogs", "Detail Description", 
-    "Machine Model", "File URL"
+    "Catalog Number",
+    "Description",
+    "Machine Type",
+    "Manufacturer",
+    "Analogs",
+    "Detail Description",
+    "Machine Model",
+    "File URL",
 ]
 
-progress_log = []  # Для отображения на UI
+# Хранилище лимитов
+model_limits = {
+    "model": "gpt-4o-mini",
+    "remaining_requests": None,
+    "remaining_tokens": None,
+    "limit_reset": None
+}
+
+progress_data = {"total": 0, "processed": 0, "status": "idle"}
+
 
 def check_requirements():
     print("[INFO] Проверка окружения...")
@@ -34,134 +42,165 @@ def check_requirements():
     if not os.path.exists("credentials.json"):
         print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
 
+
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
-        scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets"
+        ],
     )
     drive_service = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
+
+    try:
+        existing = sheet.row_values(1)
+        if not existing:
+            sheet.insert_row(HEADERS, 1)
+        elif existing != HEADERS:
+            sheet.delete_rows(1)
+            sheet.insert_row(HEADERS, 1)
+    except Exception as e:
+        print(f"[ERROR] Ошибка проверки заголовков: {e}")
+
     return drive_service, sheet
 
-def get_openai_client(model="gpt-4o-mini"):
+
+def get_openai_client():
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def send_email_report(subject, body):
-    to_email = os.getenv("REPORT_EMAIL")
-    if not to_email:
-        print("[WARNING] REPORT_EMAIL не задан, email не отправляется")
-        return
-    msg = MIMEText(body, "plain", "utf-8")
-    msg['Subject'] = subject
-    msg['From'] = to_email
-    msg['To'] = to_email
-    try:
-        with smtplib.SMTP("localhost") as server:
-            server.send_message(msg)
-        print(f"[INFO] Отчет отправлен на {to_email}")
-    except Exception as e:
-        print(f"[ERROR] Не удалось отправить email: {e}")
 
 @app.route("/")
 def index():
-    # UI с кнопками запуска анализа и повторного анализа UNKNOWN
-    return render_template_string("""
-    <h1>Анализ запчастей спецтехники</h1>
-    <button onclick="fetch('/analyze', {method:'POST'}).then(r=>r.json()).then(console.log)">Запустить анализ</button>
-    <button onclick="fetch('/reanalyze_unknown', {method:'POST'}).then(r=>r.json()).then(console.log)">Повтор анализа UNKNOWN</button>
-    <h3>Прогресс:</h3>
-    <pre id="log">{{ log }}</pre>
-    """, log="\n".join(progress_log))
+    return render_template("index.html")
 
-def analyze_files(files):
-    drive, sheet = get_google_services()
-    client = get_openai_client()
-    processed = []
-    batch_size = 5
-    total = len(files)
 
-    for i in range(0, total, batch_size):
-        batch = files[i:i+batch_size]
-        for f in batch:
-            file_id, file_name = f["id"], f["name"]
-            file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
+@app.route("/ping")
+def ping():
+    return jsonify({"status": "ok"})
 
-            catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
-            try:
-                progress_log.append(f"[INFO] Анализ {file_name} ...")
-                resp = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
-                        {"role": "user", "content":[
-                            {"type":"text","text":"Проанализируй деталь и верни строго в формате: Catalog Number, Description, Machine Type, Manufacturer, Analogs, Detail Description, Machine Model"},
-                            {"type":"image_url","image_url":{"url":file_url}}
-                        ]}
-                    ],
-                    max_tokens=400
-                )
-                answer = resp.choices[0].message.content.strip()
-                for line in answer.splitlines():
-                    line_lower = line.lower()
-                    if line_lower.startswith("catalog number"):
-                        catalog_number = line.split(":",1)[1].strip()
-                    elif line_lower.startswith("description"):
-                        description = line.split(":",1)[1].strip()
-                    elif line_lower.startswith("machine type"):
-                        machine_type = line.split(":",1)[1].strip()
-                    elif line_lower.startswith("manufacturer"):
-                        manufacturer = line.split(":",1)[1].strip()
-                    elif line_lower.startswith("analogs"):
-                        analogs = line.split(":",1)[1].strip()
-                    elif line_lower.startswith("detail description"):
-                        detail_description = line.split(":",1)[1].strip()
-                    elif line_lower.startswith("machine model"):
-                        machine_model = line.split(":",1)[1].strip()
-            except Exception as e:
-                progress_log.append(f"[ERROR] {file_name} - {e}")
-            
-            processed.append({
-                "file": file_name, "catalog_number": catalog_number,
-                "description": description, "machine_type": machine_type,
-                "manufacturer": manufacturer, "analogs": analogs,
-                "detail_description": detail_description, "machine_model": machine_model,
-                "file_url": file_url
-            })
-    return processed
+
+@app.route("/progress")
+def get_progress():
+    return jsonify(progress_data)
+
+
+@app.route("/limits")
+def get_limits():
+    return jsonify(model_limits)
+
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    drive, sheet = get_google_services()
-    TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
+    thread = threading.Thread(target=run_analysis)
+    thread.start()
+    return jsonify({"status": "started"})
+
+
+def run_analysis():
+    global model_limits
+    progress_data.update({"status": "running", "processed": 0})
+
     try:
+        drive, sheet = get_google_services()
+        client = get_openai_client()
+
+        TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
+        ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
+
         results = drive.files().list(
             q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
-            fields="files(id,name,webContentLink)"
+            fields="files(id, name, webViewLink, webContentLink)",
         ).execute()
-        files = results.get("files",[])
-        processed = analyze_files(files)
-        send_email_report("Отчет анализа запчастей", json.dumps(processed, indent=2, ensure_ascii=False))
-        return jsonify({"status":"done","processed_count":len(processed),"processed":processed})
+        files = results.get("files", [])
+        progress_data["total"] = len(files)
+
+        batch_size = 5
+        for i in range(0, len(files), batch_size):
+            batch = files[i:i + batch_size]
+            for f in batch:
+                file_id, file_name = f["id"], f["name"]
+                file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
+
+                try:
+                    resp = client.chat.completions.create(
+                        model=model_limits["model"],
+                        messages=[
+                            {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "Проанализируй изображение детали и верни строго в формате:\n"
+                                            "Catalog Number: <номер>\n"
+                                            "Description: <короткое описание>\n"
+                                            "Machine Type: <тип техники>\n"
+                                            "Manufacturer: <производитель>\n"
+                                            "Analogs: <артикулы аналогов через запятую>\n"
+                                            "Detail Description: <текстовое описание детали>\n"
+                                            "Machine Model: <модель техники>"
+                                        ),
+                                    },
+                                    {"type": "image_url", "image_url": {"url": file_url}},
+                                ],
+                            },
+                        ],
+                        max_tokens=400,
+                    )
+
+                    # === обновляем лимиты ===
+                    headers = getattr(resp, "response", {}).headers if hasattr(resp, "response") else {}
+                    model_limits.update({
+                        "model": model_limits["model"],
+                        "remaining_requests": headers.get("x-ratelimit-remaining-requests"),
+                        "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
+                        "limit_reset": headers.get("x-ratelimit-reset-requests"),
+                    })
+
+                    answer = resp.choices[0].message.content.strip()
+                    parsed = parse_answer(answer)
+                    sheet.append_row(parsed + [file_url])
+
+                    drive.files().update(
+                        fileId=file_id,
+                        addParents=os.getenv("ANALYZED_FOLDER_ID"),
+                        removeParents=os.getenv("TO_ANALYZE_FOLDER_ID"),
+                        fields="id, parents"
+                    ).execute()
+
+                except Exception as e:
+                    print(f"[ERROR] Ошибка анализа {file_name}: {e}")
+
+                progress_data["processed"] += 1
+                time.sleep(1)
+
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status":"error","message":str(e)}),500
+    finally:
+        progress_data["status"] = "done"
 
-@app.route("/reanalyze_unknown", methods=["POST"])
-def reanalyze_unknown():
-    # Чтение всех строк с UNKNOWN из Google Sheets
-    drive, sheet = get_google_services()
-    all_values = sheet.get_all_records()
-    files_to_reanalyze = []
-    for i, row in enumerate(all_values, start=2):
-        if "UNKNOWN" in [row["Catalog Number"], row["Description"], row["Machine Type"]]:
-            # Получаем ID файла из URL
-            file_id = row["File URL"].split("id=")[-1]
-            files_to_reanalyze.append({"id": file_id, "name": row["File URL"].split("/")[-1]})
-    processed = analyze_files(files_to_reanalyze)
-    send_email_report("Повторный анализ UNKNOWN", json.dumps(processed, indent=2, ensure_ascii=False))
-    return jsonify({"status":"done","processed_count":len(processed),"processed":processed})
 
-if __name__=="__main__":
+def parse_answer(answer):
+    fields = {
+        "Catalog Number": "UNKNOWN",
+        "Description": "UNKNOWN",
+        "Machine Type": "UNKNOWN",
+        "Manufacturer": "UNKNOWN",
+        "Analogs": "UNKNOWN",
+        "Detail Description": "UNKNOWN",
+        "Machine Model": "UNKNOWN",
+    }
+    for line in answer.splitlines():
+        for key in fields.keys():
+            if line.lower().startswith(key.lower()):
+                fields[key] = line.split(":", 1)[1].strip()
+    return list(fields.values())
+
+
+if __name__ == "__main__":
     check_requirements()
-    port = int(os.getenv("PORT",5000))
-    app.run(host="0.0.0.0",port=port,debug=True)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
