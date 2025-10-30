@@ -23,15 +23,17 @@ HEADERS = [
     "File URL",
 ]
 
-# Хранилище лимитов
+MODEL_CHAIN = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
+
 model_limits = {
-    "model": "gpt-4o-mini",
+    "model": MODEL_CHAIN[0],
     "remaining_requests": None,
     "remaining_tokens": None,
-    "limit_reset": None
+    "limit_reset": None,
+    "status": "OK"
 }
 
-progress_data = {"total": 0, "processed": 0, "status": "idle"}
+progress_data = {"total": 0, "processed": 0, "status": "idle", "model": MODEL_CHAIN[0]}
 
 
 def check_requirements():
@@ -151,14 +153,17 @@ def run_analysis():
                         max_tokens=400,
                     )
 
-                    # === обновляем лимиты ===
+                    # обновление лимитов
                     headers = getattr(resp, "response", {}).headers if hasattr(resp, "response") else {}
                     model_limits.update({
-                        "model": model_limits["model"],
                         "remaining_requests": headers.get("x-ratelimit-remaining-requests"),
                         "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
                         "limit_reset": headers.get("x-ratelimit-reset-requests"),
                     })
+
+                    # если лимит исчерпан — переключаем модель
+                    if model_limits["remaining_requests"] in ["0", 0, "None", None]:
+                        switch_to_lower_model()
 
                     answer = resp.choices[0].message.content.strip()
                     parsed = parse_answer(answer)
@@ -173,14 +178,31 @@ def run_analysis():
 
                 except Exception as e:
                     print(f"[ERROR] Ошибка анализа {file_name}: {e}")
+                    traceback.print_exc()
 
                 progress_data["processed"] += 1
+                progress_data["model"] = model_limits["model"]
                 time.sleep(1)
 
     except Exception as e:
         traceback.print_exc()
     finally:
         progress_data["status"] = "done"
+
+
+def switch_to_lower_model():
+    """Переключает модель на следующую в списке при исчерпании лимитов."""
+    current = model_limits["model"]
+    if current in MODEL_CHAIN:
+        idx = MODEL_CHAIN.index(current)
+        if idx + 1 < len(MODEL_CHAIN):
+            new_model = MODEL_CHAIN[idx + 1]
+            model_limits["model"] = new_model
+            model_limits["status"] = f"Лимит исчерпан — переключено на {new_model}"
+            print(f"[INFO] Переключено на {new_model}")
+        else:
+            model_limits["status"] = "⚠ Все доступные модели исчерпаны!"
+            print("[WARNING] Все модели исчерпаны!")
 
 
 def parse_answer(answer):
