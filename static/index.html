@@ -1,146 +1,79 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Analyzer — прогресс</title>
-<style>
-  :root{
-    --bg:#f6f8fb; --card:#ffffff; --accent:#2e8b57; --muted:#666;
-  }
-  body { margin:0; font-family:Inter, Arial, sans-serif; background:var(--bg); color:#111; }
-  .container{ max-width:980px; margin:18px auto; padding:12px; }
-  header{ display:flex; gap:12px; align-items:center; justify-content:space-between; }
-  h1{ margin:0; font-size:20px; }
-  .controls{ display:flex; gap:8px; flex-wrap:wrap; }
-  button{ background:var(--accent); color:#fff; border:0; padding:10px 14px; border-radius:8px; cursor:pointer; }
-  button.ghost{ background:transparent; color:var(--accent); border:1px solid rgba(0,0,0,0.08); }
-  .panel{ background:var(--card); border-radius:12px; padding:12px; box-shadow:0 6px 20px rgba(20,20,40,0.04); margin-top:12px; }
-  .progress-wrap{ display:flex; gap:12px; align-items:center; }
-  .bar{ flex:1; background:#eee; height:18px; border-radius:9px; overflow:hidden; }
-  .bar-inner{ height:100%; width:0%; background:linear-gradient(90deg,#2e8b57,#7bd18a); transition: width .4s ease; color:#fff; text-align:center; font-size:12px; line-height:18px;}
-  .info{ font-size:13px; color:var(--muted); }
-  .logs{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
-  pre{ margin:0; background:#fbfdff; padding:10px; border-radius:8px; height:300px; overflow:auto; font-size:13px; }
-  .status-row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:8px; }
-  .small{ font-size:13px; color:var(--muted); }
-  /* responsive */
-  @media (max-width:720px){
-    .logs{ grid-template-columns:1fr; }
-    header{ flex-direction:column; align-items:flex-start; gap:8px; }
-    .progress-wrap{ flex-direction:column; align-items:stretch; }
-    pre{ height:220px; }
-  }
-  .limits{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .chip{ background:#f0f6f1; color:#2a6b43; padding:6px 10px; border-radius:999px; font-size:13px; }
-</style>
+  <meta charset="UTF-8">
+  <title>Анализ изображений</title>
+  <style>
+    body { font-family: Arial; background: #fafafa; padding: 30px; color: #333; }
+    button { padding: 10px 20px; background: #007BFF; color: white; border: none; border-radius: 6px; cursor: pointer; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    .progress-container { margin-top: 30px; width: 100%; background: #ddd; border-radius: 10px; height: 24px; overflow: hidden; }
+    .progress-bar { height: 100%; width: 0%; background: #28a745; transition: width 0.5s; }
+    .limits { margin-top: 20px; font-size: 14px; }
+    .warning { color: #e67e22; }
+    .danger { color: #c0392b; }
+  </style>
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>Анализ запчастей — панель управления</h1>
-      <div class="controls">
-        <button id="startBtn">▶ Запустить анализ</button>
-        <button id="stopBtn" class="ghost">⏹ Остановить</button>
-      </div>
-    </header>
+  <h2>📷 Анализ изображений</h2>
+  <button id="startBtn">🚀 Запустить анализ</button>
 
-    <div class="panel">
-      <div class="progress-wrap">
-        <div style="flex:1">
-          <div class="bar" aria-hidden><div id="barInner" class="bar-inner">0%</div></div>
-          <div class="status-row">
-            <div class="info">Обработано: <span id="processed">0</span> / <span id="total">0</span></div>
-            <div class="limits">
-              <div class="chip">Модель: <b id="modelName">—</b></div>
-              <div class="chip">Осталось GPT-4 вызовов: <b id="rem4">—</b></div>
-              <div class="chip">Осталось GPT-3.5 вызовов: <b id="rem35">—</b></div>
-            </div>
-          </div>
-        </div>
-        <div style="width:160px;text-align:right">
-          <div class="small">Последнее использование токенов:</div>
-          <div id="usage" class="small">—</div>
-        </div>
-      </div>
+  <div class="progress-container">
+    <div class="progress-bar" id="progressBar"></div>
+  </div>
+  <p id="progressText">Ожидание запуска...</p>
 
-      <div class="logs">
-        <div>
-          <h3>Лог основного анализа</h3>
-          <pre id="mainLog">—</pre>
-        </div>
-        <div>
-          <h3>Лог повторного анализа (UNKNOWN)</h3>
-          <pre id="retryLog">—</pre>
-        </div>
-      </div>
-    </div>
+  <div class="limits">
+    <h3>⚙️ Лимиты модели:</h3>
+    <p>Модель: <b id="modelName">–</b></p>
+    <p>Оставшиеся запросы: <b id="remainingRequests">–</b></p>
+    <p>Оставшиеся токены: <b id="remainingTokens">–</b></p>
+    <p>Сброс лимита: <b id="resetTime">–</b></p>
   </div>
 
-<script>
-let evtSource = null;
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const bar = document.getElementById('progressBar');
+    const text = document.getElementById('progressText');
 
-function startStream(){
-  if(evtSource) return;
-  evtSource = new EventSource('/stream');
-  evtSource.onmessage = e => {
-    try {
-      const data = JSON.parse(e.data);
-      document.getElementById('total').innerText = data.total || 0;
-      document.getElementById('processed').innerText = data.processed || 0;
-      document.getElementById('modelName').innerText = data.current_model || '—';
-      const percent = data.total ? Math.round((data.processed/data.total)*100) : 0;
-      const bar = document.getElementById('barInner');
-      bar.style.width = percent + '%';
-      bar.textContent = percent + '%';
-      // logs
-      document.getElementById('mainLog').innerHTML = (data.main_log || []).join('\\n') || '-';
-      document.getElementById('retryLog').innerHTML = (data.retry_log || []).join('\\n') || '-';
-      // remaining
-      const rem = data.remaining || {};
-      document.getElementById('rem4').innerText = (rem["gpt-4o-mini"]===null)? 'unknown' : rem["gpt-4o-mini"];
-      document.getElementById('rem35').innerText = (rem["gpt-3.5-turbo"]===null)? 'unknown' : rem["gpt-3.5-turbo"];
-      // usage
-      document.getElementById('usage').innerText = JSON.stringify(data.last_usage||{}) || '-';
-      if(data.done || data.error || data.stopped){
-        // keep stream open but indicate done
-        if(data.done) {
-          appendToMain("[INFO] Анализ завершён");
-        }
-        if(data.stopped) {
-          appendToMain("[INFO] Анализ остановлен пользователем.");
-        }
+    startBtn.onclick = async () => {
+      startBtn.disabled = true;
+      text.textContent = '⏳ Анализ запущен...';
+      await fetch('/analyze', { method: 'POST' });
+      updateProgress();
+      updateLimits();
+    };
+
+    async function updateProgress() {
+      const res = await fetch('/progress');
+      const data = await res.json();
+
+      if (data.total > 0) {
+        const percent = (data.processed / data.total) * 100;
+        bar.style.width = percent + '%';
+        text.textContent = `📦 Обработано ${data.processed} из ${data.total}`;
       }
-    } catch(err){
-      console.error('parse stream data', err);
+
+      if (data.status === 'done') {
+        text.textContent = '✅ Анализ завершен!';
+        startBtn.disabled = false;
+        return;
+      }
+
+      setTimeout(updateProgress, 2000);
     }
-  };
-  evtSource.onerror = e => {
-    console.warn('SSE error', e);
-    // try reconnect automatically by closing and re-opening
-    evtSource.close();
-    evtSource = null;
-    setTimeout(startStream, 2000);
-  };
-}
 
-function appendToMain(text){
-  const el = document.getElementById('mainLog');
-  el.innerText = (el.innerText === '—' ? '' : el.innerText + '\\n') + text;
-}
+    async function updateLimits() {
+      const res = await fetch('/limits');
+      const data = await res.json();
 
-document.getElementById('startBtn').addEventListener('click', async ()=> {
-  fetch('/start', {method:'POST'});
-  startStream();
-});
+      document.getElementById('modelName').textContent = data.model;
+      document.getElementById('remainingRequests').textContent = data.remaining_requests || '–';
+      document.getElementById('remainingTokens').textContent = data.remaining_tokens || '–';
+      document.getElementById('resetTime').textContent = data.limit_reset || '–';
 
-document.getElementById('stopBtn').addEventListener('click', async ()=> {
-  fetch('/stop', {method:'POST'});
-  appendToMain('[USER] Sent stop request');
-});
-
-// auto-start stream so page always live
-startStream();
-</script>
+      setTimeout(updateLimits, 10000);
+    }
+  </script>
 </body>
 </html>
