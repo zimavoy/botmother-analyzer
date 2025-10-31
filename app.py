@@ -1,14 +1,12 @@
 import os
 import traceback
-import threading
-import time
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, send_from_directory
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 from openai import OpenAI
 
-app = Flask(__name__, static_url_path='', static_folder='static', template_folder='templates')
+app = Flask(__name__, static_folder="static", static_url_path="")
 
 REQUIRED_ENV_VARS = ["OPENAI_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
@@ -23,19 +21,6 @@ HEADERS = [
     "File URL",
 ]
 
-MODEL_CHAIN = ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-3.5-turbo-16k"]
-
-model_limits = {
-    "model": MODEL_CHAIN[0],
-    "remaining_requests": None,
-    "remaining_tokens": None,
-    "limit_reset": None,
-    "status": "OK"
-}
-
-progress_data = {"total": 0, "processed": 0, "status": "idle", "model": MODEL_CHAIN[0]}
-
-
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -44,13 +29,12 @@ def check_requirements():
     if not os.path.exists("credentials.json"):
         print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
 
-
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
         scopes=[
             "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/spreadsheets"
+            "https://www.googleapis.com/auth/spreadsheets",
         ],
     )
     drive_service = build("drive", "v3", credentials=creds)
@@ -59,75 +43,70 @@ def get_google_services():
     try:
         existing = sheet.row_values(1)
         if not existing:
+            print("[INFO] Заголовки отсутствуют, добавляю...")
             sheet.insert_row(HEADERS, 1)
         elif existing != HEADERS:
+            print("[WARNING] Заголовки не совпадают, обновляю...")
             sheet.delete_rows(1)
             sheet.insert_row(HEADERS, 1)
     except Exception as e:
-        print(f"[ERROR] Ошибка проверки заголовков: {e}")
+        print(f"[ERROR] Ошибка при проверке заголовков: {e}")
 
     return drive_service, sheet
-
 
 def get_openai_client():
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return send_from_directory(app.static_folder, "index.html")
 
-
-@app.route("/ping")
+@app.route("/ping", methods=["GET"])
 def ping():
-    return jsonify({"status": "ok"})
-
-
-@app.route("/progress")
-def get_progress():
-    return jsonify(progress_data)
-
-
-@app.route("/limits")
-def get_limits():
-    return jsonify(model_limits)
-
+    return jsonify({"status": "ok", "message": "pong"})
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    thread = threading.Thread(target=run_analysis)
-    thread.start()
-    return jsonify({"status": "started"})
-
-
-def run_analysis():
-    global model_limits
-    progress_data.update({"status": "running", "processed": 0})
-
     try:
         drive, sheet = get_google_services()
         client = get_openai_client()
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-        TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
-        ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
+    TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
+    ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
+    processed = []
 
+    try:
         results = drive.files().list(
             q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
             fields="files(id, name, webViewLink, webContentLink)",
         ).execute()
         files = results.get("files", [])
-        progress_data["total"] = len(files)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
 
-        batch_size = 5
-        for i in range(0, len(files), batch_size):
-            batch = files[i:i + batch_size]
-            for f in batch:
-                file_id, file_name = f["id"], f["name"]
-                file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
+    batch_size = 5
+    total = len(files)
+    remaining = total
 
+    for i in range(0, total, batch_size):
+        batch = files[i:i + batch_size]
+        print(f"[INFO] Анализ партии {i // batch_size + 1} из {len(batch)} файлов")
+
+        for f in batch:
+            file_id, file_name = f["id"], f["name"]
+            file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
+            fields = ["UNKNOWN"] * 7
+            models = ["gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]
+
+            for model in models:
                 try:
+                    print(f"[INFO] Анализ {file_name} с моделью {model}")
                     resp = client.chat.completions.create(
-                        model=model_limits["model"],
+                        model=model,
                         messages=[
                             {"role": "system", "content": "Ты эксперт по запчастям строительной техники."},
                             {
@@ -143,7 +122,7 @@ def run_analysis():
                                             "Manufacturer: <производитель>\n"
                                             "Analogs: <артикулы аналогов через запятую>\n"
                                             "Detail Description: <текстовое описание детали>\n"
-                                            "Machine Model: <модель техники>"
+                                            "Machine Model: <текстовое описание модели>"
                                         ),
                                     },
                                     {"type": "image_url", "image_url": {"url": file_url}},
@@ -152,75 +131,43 @@ def run_analysis():
                         ],
                         max_tokens=400,
                     )
-
-                    # обновление лимитов
-                    headers = getattr(resp, "response", {}).headers if hasattr(resp, "response") else {}
-                    model_limits.update({
-                        "remaining_requests": headers.get("x-ratelimit-remaining-requests"),
-                        "remaining_tokens": headers.get("x-ratelimit-remaining-tokens"),
-                        "limit_reset": headers.get("x-ratelimit-reset-requests"),
-                    })
-
-                    # если лимит исчерпан — переключаем модель
-                    if model_limits["remaining_requests"] in ["0", 0, "None", None]:
-                        switch_to_lower_model()
-
                     answer = resp.choices[0].message.content.strip()
-                    parsed = parse_answer(answer)
-                    sheet.append_row(parsed + [file_url])
+                    print(f"[DEBUG] Ответ модели:\n{answer}")
 
-                    drive.files().update(
-                        fileId=file_id,
-                        addParents=os.getenv("ANALYZED_FOLDER_ID"),
-                        removeParents=os.getenv("TO_ANALYZE_FOLDER_ID"),
-                        fields="id, parents"
-                    ).execute()
+                    parsed = {}
+                    for line in answer.splitlines():
+                        if ":" in line:
+                            k, v = line.split(":", 1)
+                            parsed[k.strip()] = v.strip()
 
+                    fields = [
+                        parsed.get("Catalog Number", "UNKNOWN"),
+                        parsed.get("Description", "UNKNOWN"),
+                        parsed.get("Machine Type", "UNKNOWN"),
+                        parsed.get("Manufacturer", "UNKNOWN"),
+                        parsed.get("Analogs", "UNKNOWN"),
+                        parsed.get("Detail Description", "UNKNOWN"),
+                        parsed.get("Machine Model", "UNKNOWN"),
+                    ]
+                    break
                 except Exception as e:
-                    print(f"[ERROR] Ошибка анализа {file_name}: {e}")
-                    traceback.print_exc()
+                    print(f"[WARNING] Ошибка анализа {file_name} с {model}: {e}")
+                    continue
 
-                progress_data["processed"] += 1
-                progress_data["model"] = model_limits["model"]
-                time.sleep(1)
+            try:
+                sheet.append_row(fields + [file_url])
+            except Exception:
+                print(f"[ERROR] Не удалось записать строку для {file_name}")
 
-    except Exception as e:
-        traceback.print_exc()
-    finally:
-        progress_data["status"] = "done"
+            processed.append({
+                "file": file_name,
+                "model_used": model,
+                "fields": fields,
+            })
+            remaining -= 1
+            print(f"[PROGRESS] Осталось: {remaining}/{total}")
 
-
-def switch_to_lower_model():
-    """Переключает модель на следующую в списке при исчерпании лимитов."""
-    current = model_limits["model"]
-    if current in MODEL_CHAIN:
-        idx = MODEL_CHAIN.index(current)
-        if idx + 1 < len(MODEL_CHAIN):
-            new_model = MODEL_CHAIN[idx + 1]
-            model_limits["model"] = new_model
-            model_limits["status"] = f"Лимит исчерпан — переключено на {new_model}"
-            print(f"[INFO] Переключено на {new_model}")
-        else:
-            model_limits["status"] = "⚠ Все доступные модели исчерпаны!"
-            print("[WARNING] Все модели исчерпаны!")
-
-
-def parse_answer(answer):
-    fields = {
-        "Catalog Number": "UNKNOWN",
-        "Description": "UNKNOWN",
-        "Machine Type": "UNKNOWN",
-        "Manufacturer": "UNKNOWN",
-        "Analogs": "UNKNOWN",
-        "Detail Description": "UNKNOWN",
-        "Machine Model": "UNKNOWN",
-    }
-    for line in answer.splitlines():
-        for key in fields.keys():
-            if line.lower().startswith(key.lower()):
-                fields[key] = line.split(":", 1)[1].strip()
-    return list(fields.values())
-
+    return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
 if __name__ == "__main__":
     check_requirements()
