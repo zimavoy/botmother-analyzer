@@ -1,95 +1,104 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8" />
-  <title>AI Анализатор</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Анализ через Yandex Vision</title>
   <style>
-    body { background: #f8f8f8; }
-    #progress-container { margin-top: 20px; }
-    #log { background: #fff; padding: 10px; height: 200px; overflow-y: auto; border: 1px solid #ddd; }
-    #limitInfo { font-weight: bold; }
+    body{font-family:Arial,Helvetica,sans-serif;background:#f6f8fb;margin:0;padding:20px}
+    .card{max-width:900px;margin:20px auto;background:#fff;padding:20px;border-radius:12px;box-shadow:0 6px 20px rgba(20,20,40,0.06)}
+    h1{margin:0 0 12px 0;font-size:20px}
+    .controls{display:flex;gap:10px;align-items:center}
+    button{padding:10px 14px;border-radius:8px;border:0;background:#2e8b57;color:#fff;cursor:pointer}
+    button.stop{background:#d9534f}
+    #progressWrap{margin-top:16px}
+    #bar{height:22px;background:#e6edf2;border-radius:11px;overflow:hidden}
+    #barInner{height:100%;width:0;background:linear-gradient(90deg,#2e8b57,#7bd18a);text-align:center;color:#fff;line-height:22px}
+    .info{margin-top:10px;color:#555}
+    .log{margin-top:12px;background:#fafcff;border:1px solid #e6eef4;padding:10px;border-radius:8px;height:300px;overflow:auto;font-family:monospace;font-size:13px}
+    @media (max-width:600px){.controls{flex-direction:column;align-items:stretch}}
   </style>
 </head>
-<body class="section">
-  <div class="container">
-    <h1 class="title">🔧 AI Анализатор деталей</h1>
-
-    <div class="buttons">
-      <button id="startBtn" class="button is-primary">🚀 Запустить анализ</button>
-      <button id="stopBtn" class="button is-danger" disabled>⛔ Остановить</button>
+<body>
+  <div class="card">
+    <h1>Анализ изображений — Yandex Vision</h1>
+    <div class="controls">
+      <button id="startBtn">Запустить анализ</button>
+      <button id="stopBtn" class="stop" style="display:none">Остановить</button>
+      <div style="margin-left:auto">
+        <strong>Model:</strong> <span id="model">YandexVision</span>
+      </div>
     </div>
 
-    <p>💰 Лимиты OpenAI: <span id="limitInfo">загрузка...</span></p>
-
-    <div id="progress-container">
-      <progress id="progress" class="progress is-info" value="0" max="100">0%</progress>
+    <div id="progressWrap">
+      <div id="bar"><div id="barInner">0%</div></div>
+      <div class="info" id="infoText">Готово к запуску</div>
     </div>
 
-    <h2 class="subtitle mt-4">Логи выполнения</h2>
-    <div id="log"></div>
+    <div class="log" id="log"></div>
   </div>
 
-  <script>
-    const startBtn = document.getElementById("startBtn");
-    const stopBtn = document.getElementById("stopBtn");
-    const progressBar = document.getElementById("progress");
-    const logDiv = document.getElementById("log");
-    const limitInfo = document.getElementById("limitInfo");
-    let stopRequested = false;
+<script>
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const barInner = document.getElementById('barInner');
+const infoText = document.getElementById('infoText');
+const logDiv = document.getElementById('log');
 
-    function log(message, color="#333") {
-      const line = document.createElement("div");
-      line.style.color = color;
-      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-      logDiv.appendChild(line);
-      logDiv.scrollTop = logDiv.scrollHeight;
+let pollingInterval = null;
+
+function appendLog(text){
+  const t = new Date().toLocaleTimeString();
+  logDiv.innerHTML += `[${t}] ${text}\n`;
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+async function fetchStatus(){
+  try{
+    const r = await fetch('/status');
+    const j = await r.json();
+    const total = j.total || 0;
+    const processed = j.processed || 0;
+    const done = j.done;
+    const current = j.current_file || '';
+    const logs = j.logs || [];
+    if(total>0){
+      const pct = Math.round((processed/total)*100);
+      barInner.style.width = pct+'%';
+      barInner.textContent = pct+'%';
+      infoText.textContent = `Обработано ${processed} из ${total}. Текущий файл: ${current}`;
+    } else {
+      barInner.style.width = '0%';
+      barInner.textContent = '0%';
     }
-
-    async function fetchModelLimits() {
-      try {
-        const res = await fetch("/model_limits");
-        const data = await res.json();
-        if (data.status === "ok") {
-          const text = `${data.remaining} / ${data.total_granted} USD (обновлено ${data.updated})`;
-          limitInfo.textContent = text;
-          limitInfo.style.color = data.remaining < 1 ? "red" : "#222";
-        } else limitInfo.textContent = "Ошибка загрузки лимитов";
-      } catch {
-        limitInfo.textContent = "Ошибка сети";
-      }
-    }
-    setInterval(fetchModelLimits, 10000);
-    fetchModelLimits();
-
-    async function startAnalysis() {
-      stopRequested = false;
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      progressBar.value = 0;
-      log("Запуск анализа...", "blue");
-
-      const res = await fetch("/analyze", { method: "POST" });
-      const data = await res.json();
-
-      if (data.status === "done") {
-        log(`✅ Анализ завершён. Обработано ${data.processed_count} файлов.`, "green");
-        progressBar.value = 100;
-      } else {
-        log(`⚠️ Ошибка: ${data.message}`, "red");
-      }
-
+    // merge logs to UI (last 100)
+    logDiv.innerText = logs.slice(-200).join("\n");
+    if(done){
+      appendLog('Анализ завершён');
       startBtn.disabled = false;
-      stopBtn.disabled = true;
+      stopBtn.style.display = 'none';
+      clearInterval(pollingInterval);
     }
+  }catch(e){
+    appendLog('Ошибка получения статуса: '+e.message);
+  }
+}
 
-    startBtn.onclick = startAnalysis;
-    stopBtn.onclick = () => {
-      stopRequested = true;
-      log("Остановка анализа пользователем", "orange");
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-    };
-  </script>
+startBtn.addEventListener('click', async ()=>{
+  startBtn.disabled = true;
+  stopBtn.style.display = 'inline-block';
+  appendLog('Запускаем worker...');
+  await fetch('/start', {method:'POST'});
+  // start polling
+  pollingInterval = setInterval(fetchStatus, 1200);
+  fetchStatus();
+});
+
+stopBtn.addEventListener('click', ()=>{
+  // stop is cooperative in worker: not implemented stop endpoint here; we show as placeholder
+  appendLog('Кнопка остановки нажата — остановка не реализована в этой сборке');
+});
+
+</script>
 </body>
 </html>
