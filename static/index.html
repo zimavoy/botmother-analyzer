@@ -1,61 +1,75 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <title>Yandex Vision Analyzer</title>
-    <link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <title>Анализ изображений — Yandex Vision</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
 </head>
-<body>
-    <h2>🔍 Анализ изображений (Yandex Vision API)</h2>
-    <form id="uploadForm">
-        <input type="file" id="images" name="images" multiple accept="image/*">
-        <button type="submit">Запустить анализ</button>
+<body class="bg-light text-center p-4">
+  <div class="container">
+    <h1 class="mb-4">🔍 Анализ изображений (Yandex Vision API)</h1>
+
+    <form id="uploadForm" enctype="multipart/form-data">
+      <input type="file" name="images" id="images" multiple class="form-control mb-3">
+      <button type="submit" class="btn btn-primary">Запустить анализ</button>
     </form>
 
-    <div id="progress"></div>
-    <div id="results"></div>
+    <div class="progress mt-4" style="height: 25px;">
+      <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%;">0%</div>
+    </div>
 
-    <hr>
-    <button id="checkLimits">Проверить лимиты</button>
-    <div id="limits"></div>
+    <h5 class="mt-3" id="statusText">Ожидание...</h5>
 
-    <script>
-        const form = document.getElementById('uploadForm');
-        const progressDiv = document.getElementById('progress');
-        const resultsDiv = document.getElementById('results');
-        const limitsDiv = document.getElementById('limits');
-        const checkLimits = document.getElementById('checkLimits');
+    <div class="mt-4 text-start">
+      <h4>Результаты:</h4>
+      <ul id="results" class="list-group"></ul>
+    </div>
 
-        form.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            progressDiv.innerText = "⏳ Анализ изображений...";
-            resultsDiv.innerHTML = "";
+    <div class="mt-4 text-start">
+      <h4>Журнал анализа:</h4>
+      <pre id="logOutput" class="bg-dark text-white p-3 rounded"></pre>
+    </div>
+  </div>
 
-            const formData = new FormData(form);
-            const res = await fetch('/analyze', { method: 'POST', body: formData });
-            const data = await res.json();
+  <script>
+    const form = document.getElementById("uploadForm");
+    const progressBar = document.getElementById("progressBar");
+    const statusText = document.getElementById("statusText");
+    const resultsList = document.getElementById("results");
+    const logOutput = document.getElementById("logOutput");
 
-            if (data.status === "ok") {
-                progressDiv.innerText = "✅ Анализ завершён";
-                data.results.forEach(r => {
-                    const p = document.createElement('p');
-                    if (r.status === "ok") {
-                        p.textContent = `🖼 ${r.filename}: ${r.description}`;
-                    } else {
-                        p.textContent = `⚠️ ${r.filename}: ${r.message}`;
-                    }
-                    resultsDiv.appendChild(p);
-                });
-            } else {
-                progressDiv.innerText = "❌ Ошибка: " + data.message;
-            }
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const formData = new FormData(form);
+      resultsList.innerHTML = "";
+      logOutput.textContent = "";
+      progressBar.style.width = "0%";
+      statusText.textContent = "Загрузка и анализ...";
+
+      fetch("/analyze", { method: "POST", body: formData })
+        .then((res) => res.json())
+        .then((data) => {
+          data.forEach(item => {
+            const li = document.createElement("li");
+            li.className = "list-group-item";
+            li.textContent = `${item.filename}: ${item.result}`;
+            resultsList.appendChild(li);
+          });
         });
+    });
 
-        checkLimits.addEventListener('click', async () => {
-            const res = await fetch('/limits');
-            const data = await res.json();
-            limitsDiv.innerText = `⏱ Осталось ${data.token_valid_minutes} мин. до обновления токена\n${data.message}`;
-        });
-    </script>
+    // Обновление прогресса
+    setInterval(async () => {
+      const res = await fetch("/progress");
+      const data = await res.json();
+      const percent = Math.floor((data.current / data.total) * 100) || 0;
+      progressBar.style.width = percent + "%";
+      progressBar.textContent = percent + "%";
+      statusText.textContent = data.status;
+
+      const logs = await fetch("/logs").then(r => r.json());
+      logOutput.textContent = logs.logs.join("\n");
+    }, 1000);
+  </script>
 </body>
 </html>
