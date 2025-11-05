@@ -1,176 +1,152 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Анализатор изображений</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Live Анализатор (Yandex Vision)</title>
   <style>
-    body {
-      font-family: "Inter", sans-serif;
-      background: #f9fafb;
-      margin: 0;
-      padding: 0;
-      color: #222;
-    }
-
-    header {
-      background: #1f2937;
-      color: white;
-      padding: 1rem;
-      text-align: center;
-    }
-
-    .container {
-      max-width: 800px;
-      margin: 2rem auto;
-      background: white;
-      padding: 2rem;
-      border-radius: 12px;
-      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
-    }
-
-    .button {
-      background: #2563eb;
-      color: white;
-      border: none;
-      padding: 0.8rem 1.6rem;
-      border-radius: 8px;
-      font-size: 1rem;
-      cursor: pointer;
-      margin-right: 1rem;
-      transition: background 0.3s;
-    }
-
-    .button:hover {
-      background: #1e40af;
-    }
-
-    .button.stop {
-      background: #dc2626;
-    }
-
-    .button.stop:hover {
-      background: #b91c1c;
-    }
-
-    .status {
-      margin-top: 1rem;
-      padding: 1rem;
-      background: #f3f4f6;
-      border-radius: 8px;
-      font-size: 0.95rem;
-      line-height: 1.4rem;
-      white-space: pre-line;
-      overflow-y: auto;
-      max-height: 300px;
-    }
-
-    .footer {
-      margin-top: 2rem;
-      text-align: center;
-      font-size: 0.85rem;
-      color: #6b7280;
-    }
-
-    @media (max-width: 600px) {
-      .container {
-        margin: 1rem;
-        padding: 1.5rem;
-      }
-
-      .button {
-        display: block;
-        width: 100%;
-        margin-bottom: 1rem;
-      }
-    }
+    body { font-family: Inter, system-ui, Arial; background:#f6f8fa; margin:0; padding:18px; color:#111; }
+    .card { max-width:980px; margin:14px auto; background:#fff; padding:18px; border-radius:12px; box-shadow:0 6px 20px rgba(22,28,37,0.06); }
+    .controls { display:flex; gap:10px; flex-wrap:wrap; }
+    button { padding:10px 14px; border-radius:8px; border:0; cursor:pointer; background:#2563eb; color:#fff; }
+    button.stop { background:#ef4444; }
+    #progressWrap { margin-top:12px; background:#e6eef8; border-radius:12px; height:22px; overflow:hidden; }
+    #prog { height:22px; width:0%; background:linear-gradient(90deg,#06b6d4,#34d399); transition:width .4s; }
+    .statusRow { display:flex; gap:12px; margin-top:12px; align-items:center; }
+    .stat { background:#f1f5f9; padding:8px 12px; border-radius:8px; font-size:14px; }
+    #log { margin-top:14px; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; height:300px; overflow:auto; font-family:monospace; font-size:13px; white-space:pre-wrap; }
   </style>
 </head>
 <body>
-  <header>
-    <h2>🔍 Анализатор изображений (Yandex Vision)</h2>
-  </header>
+  <div class="card">
+    <h2>🔍 Live Анализатор изображений — Yandex Vision</h2>
 
-  <div class="container">
-    <div>
-      <button class="button" id="startButton">🚀 Начать анализ</button>
-      <button class="button stop" id="stopButton">⛔ Остановить</button>
+    <div class="controls" style="margin-top:12px;">
+      <button id="startBtn">🚀 Запустить анализ</button>
+      <button id="stopBtn" class="stop">⛔ Остановить</button>
+      <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+        <div class="stat">API key: <span id="apiStatus">—</span></div>
+        <div class="stat">Model/Limits: <span id="limitStatus">—</span></div>
+      </div>
     </div>
 
-    <div class="status" id="statusBox">Готов к запуску...</div>
-
-    <div class="footer">
-      <p>Статус обновляется автоматически каждые 5 секунд</p>
+    <div id="progressWrap">
+      <div id="prog">0%</div>
     </div>
+
+    <div class="statusRow">
+      <div class="stat">Обработано: <span id="processed">0</span></div>
+      <div class="stat">Всего: <span id="total">0</span></div>
+      <div class="stat">UNKNOWN: <span id="unknown">0</span></div>
+      <div class="stat">Concurrency: <span id="concurrency">?</span></div>
+    </div>
+
+    <div id="log">Лог событий появится здесь...</div>
   </div>
 
-  <script>
-    const startButton = document.getElementById("startButton");
-    const stopButton = document.getElementById("stopButton");
-    const statusBox = document.getElementById("statusBox");
-    let intervalId = null;
-    let isRunning = false;
+<script>
+(function(){
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn  = document.getElementById('stopBtn');
+  const prog     = document.getElementById('prog');
+  const processedEl = document.getElementById('processed');
+  const totalEl = document.getElementById('total');
+  const unknownEl = document.getElementById('unknown');
+  const apiStatus = document.getElementById('apiStatus');
+  const limitStatus = document.getElementById('limitStatus');
+  const logEl = document.getElementById('log');
 
-    function appendStatus(text) {
-      const now = new Date().toLocaleTimeString();
-      statusBox.textContent += `\n[${now}] ${text}`;
-      statusBox.scrollTop = statusBox.scrollHeight;
+  let total = 0, processed = 0, unknown = 0;
+  const concurrency = { value: null };
+  document.getElementById('concurrency').textContent = (new URLSearchParams(location.search).get('concurrency')) || 'configured';
+
+  function appendLog(line){
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent += `[${t}] ${line}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // SSE
+  const evtSource = new EventSource('/stream');
+  evtSource.addEventListener('log', e => {
+    appendLog(e.data);
+  });
+  evtSource.addEventListener('start', e => {
+    const d = JSON.parse(e.data);
+    total = d.total || 0;
+    totalEl.textContent = total;
+    processed = 0;
+    processedEl.textContent = processed;
+    unknown = 0;
+    unknownEl.textContent = unknown;
+    prog.style.width = '0%';
+  });
+  evtSource.addEventListener('progress', e => {
+    const d = JSON.parse(e.data);
+    processed = d.processed || processed;
+    processedEl.textContent = processed;
+    const pct = total>0 ? Math.round((processed/total)*100) : 0;
+    prog.style.width = pct + '%';
+    prog.textContent = pct + '%';
+  });
+  evtSource.addEventListener('result', e => {
+    const d = JSON.parse(e.data);
+    const preview = d.text_preview || d.text || '';
+    appendLog(`✅ ${d.file} → ${preview.slice(0,180)}`);
+    if(preview === 'UNKNOWN') {
+      unknown++;
+      unknownEl.textContent = unknown;
     }
-
-    startButton.addEventListener("click", async () => {
-      if (isRunning) {
-        appendStatus("⚙️ Анализ уже запущен...");
-        return;
+  });
+  evtSource.addEventListener('done', e => {
+    const d = JSON.parse(e.data);
+    appendLog(`🎉 Done. Processed: ${d.processed}`);
+    // ping limits after done
+    fetch('/limits').then(r=>r.json()).then(j=>{
+      apiStatus.textContent = j.api_key_present ? 'present' : 'missing';
+      if(j.checked){
+        limitStatus.textContent = j.ok ? `OK (code ${j.status_code})` : `ERROR (${j.status_code})`;
+      } else {
+        limitStatus.textContent = j.note || 'n/a';
       }
+    }).catch(_=>{});
+  });
+  evtSource.addEventListener('error', e => {
+    appendLog(`❌ error: ${e.data || '(connection error)'}`);
+  });
 
-      appendStatus("🚀 Запуск анализа...");
-      isRunning = true;
-
-      try {
-        const response = await fetch("/analyze", { method: "POST" });
-        const result = await response.json();
-
-        if (result.status === "done") {
-          appendStatus(`✅ Готово! Обработано: ${result.processed_count} файлов`);
-          if (result.processed?.length) {
-            result.processed.forEach((r) => {
-              appendStatus(`📄 ${r.file}: ${r.recognized_text}`);
-            });
-          }
-        } else {
-          appendStatus("⚠️ Ошибка при запуске анализа");
-        }
-      } catch (err) {
-        appendStatus("❌ Ошибка соединения с сервером");
-      } finally {
-        isRunning = false;
-      }
-    });
-
-    stopButton.addEventListener("click", () => {
-      if (!isRunning) {
-        appendStatus("⏹️ Анализ не запущен.");
-        return;
-      }
-      appendStatus("🛑 Анализ остановлен пользователем.");
-      isRunning = false;
-      clearInterval(intervalId);
-    });
-
-    // Проверка статуса каждые 5 секунд
-    async function checkPing() {
-      try {
-        const res = await fetch("/ping");
-        const data = await res.json();
-        if (data.status === "ok") {
-          appendStatus("💡 Сервер активен");
-        }
-      } catch {
-        appendStatus("⚠️ Не удалось связаться с сервером");
-      }
+  // endpoints
+  startBtn.onclick = async () => {
+    appendLog('▶ Requesting start...');
+    const r = await fetch('/start', { method: 'POST' });
+    if(r.status === 200 || r.status === 201){
+      appendLog('Worker started');
+    } else if(r.status === 409){
+      appendLog('Worker already running');
+    } else {
+      const j = await r.json().catch(()=>({}));
+      appendLog('Start failed: ' + (j.message || r.statusText));
     }
+    // refresh limits
+    fetch('/limits').then(r=>r.json()).then(j=>{
+      apiStatus.textContent = j.api_key_present ? 'present' : 'missing';
+      limitStatus.textContent = j.note || (j.checked ? (j.ok ? 'OK' : 'ERROR') : 'n/a');
+    }).catch(_=>{});
+  };
 
-    intervalId = setInterval(checkPing, 5000);
-  </script>
+  stopBtn.onclick = async () => {
+    appendLog('⏸ Requesting stop...');
+    const r = await fetch('/stop', { method: 'POST' });
+    if(r.ok) appendLog('Stop requested');
+    else appendLog('Stop request failed');
+  };
+
+  // initial limits check
+  fetch('/limits').then(r=>r.json()).then(j=>{
+    apiStatus.textContent = j.api_key_present ? 'present' : 'missing';
+    limitStatus.textContent = j.note || (j.checked ? (j.ok ? 'OK' : 'ERROR') : 'n/a');
+  }).catch(_=>{});
+})();
+</script>
 </body>
 </html>
