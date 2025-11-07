@@ -1,152 +1,169 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Live Анализатор (Yandex Vision)</title>
-  <style>
-    body { font-family: Inter, system-ui, Arial; background:#f6f8fa; margin:0; padding:18px; color:#111; }
-    .card { max-width:980px; margin:14px auto; background:#fff; padding:18px; border-radius:12px; box-shadow:0 6px 20px rgba(22,28,37,0.06); }
-    .controls { display:flex; gap:10px; flex-wrap:wrap; }
-    button { padding:10px 14px; border-radius:8px; border:0; cursor:pointer; background:#2563eb; color:#fff; }
-    button.stop { background:#ef4444; }
-    #progressWrap { margin-top:12px; background:#e6eef8; border-radius:12px; height:22px; overflow:hidden; }
-    #prog { height:22px; width:0%; background:linear-gradient(90deg,#06b6d4,#34d399); transition:width .4s; }
-    .statusRow { display:flex; gap:12px; margin-top:12px; align-items:center; }
-    .stat { background:#f1f5f9; padding:8px 12px; border-radius:8px; font-size:14px; }
-    #log { margin-top:14px; background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; height:300px; overflow:auto; font-family:monospace; font-size:13px; white-space:pre-wrap; }
-  </style>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Анализ изображений — Yandex Vision</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <style>
+        body {
+            font-family: 'Segoe UI', Roboto, sans-serif;
+            background: #f9fafb;
+            color: #222;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 40px auto;
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            text-align: center;
+            color: #0056d6;
+        }
+
+        button {
+            display: block;
+            margin: 20px auto;
+            padding: 10px 24px;
+            font-size: 18px;
+            border: none;
+            border-radius: 8px;
+            background: #0056d6;
+            color: white;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        button:hover { background: #003ea8; }
+
+        #progressContainer {
+            width: 100%;
+            background: #e0e0e0;
+            border-radius: 8px;
+            margin: 20px 0;
+            height: 24px;
+            overflow: hidden;
+        }
+
+        #progressBar {
+            width: 0%;
+            height: 100%;
+            background: linear-gradient(90deg, #00b894, #0984e3);
+            transition: width 0.3s ease;
+        }
+
+        pre {
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 15px;
+            border-radius: 10px;
+            height: 300px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .status {
+            text-align: center;
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+
+        .status.error { color: #e74c3c; }
+        .status.success { color: #2ecc71; }
+    </style>
 </head>
 <body>
-  <div class="card">
-    <h2>🔍 Live Анализатор изображений — Yandex Vision</h2>
+    <div class="container">
+        <h1>🧠 Анализ изображений (Yandex Vision)</h1>
+        <div class="status" id="statusMsg">Ожидание запуска...</div>
 
-    <div class="controls" style="margin-top:12px;">
-      <button id="startBtn">🚀 Запустить анализ</button>
-      <button id="stopBtn" class="stop">⛔ Остановить</button>
-      <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
-        <div class="stat">API key: <span id="apiStatus">—</span></div>
-        <div class="stat">Model/Limits: <span id="limitStatus">—</span></div>
-      </div>
+        <button id="startBtn">🚀 Запустить анализ</button>
+
+        <div id="progressContainer">
+            <div id="progressBar"></div>
+        </div>
+
+        <pre id="log">Лог анализа появится здесь...</pre>
     </div>
 
-    <div id="progressWrap">
-      <div id="prog">0%</div>
-    </div>
+    <script>
+        const startBtn = document.getElementById("startBtn");
+        const logEl = document.getElementById("log");
+        const statusMsg = document.getElementById("statusMsg");
+        const progressBar = document.getElementById("progressBar");
 
-    <div class="statusRow">
-      <div class="stat">Обработано: <span id="processed">0</span></div>
-      <div class="stat">Всего: <span id="total">0</span></div>
-      <div class="stat">UNKNOWN: <span id="unknown">0</span></div>
-      <div class="stat">Concurrency: <span id="concurrency">?</span></div>
-    </div>
+        function log(msg, color="#c9d1d9") {
+            logEl.innerHTML += `<span style="color:${color}">${msg}</span>\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
 
-    <div id="log">Лог событий появится здесь...</div>
-  </div>
+        async function startAnalyze() {
+            startBtn.disabled = true;
+            statusMsg.textContent = "🔄 Анализ выполняется...";
+            statusMsg.className = "status";
 
-<script>
-(function(){
-  const startBtn = document.getElementById('startBtn');
-  const stopBtn  = document.getElementById('stopBtn');
-  const prog     = document.getElementById('prog');
-  const processedEl = document.getElementById('processed');
-  const totalEl = document.getElementById('total');
-  const unknownEl = document.getElementById('unknown');
-  const apiStatus = document.getElementById('apiStatus');
-  const limitStatus = document.getElementById('limitStatus');
-  const logEl = document.getElementById('log');
+            logEl.textContent = "";
+            progressBar.style.width = "0%";
 
-  let total = 0, processed = 0, unknown = 0;
-  const concurrency = { value: null };
-  document.getElementById('concurrency').textContent = (new URLSearchParams(location.search).get('concurrency')) || 'configured';
+            try {
+                const imageList = prompt("Введите ссылки на изображения (через запятую):");
+                if (!imageList) {
+                    log("⚠️ Анализ отменён пользователем", "#f1c40f");
+                    statusMsg.textContent = "Отменено";
+                    startBtn.disabled = false;
+                    return;
+                }
 
-  function appendLog(line){
-    const t = new Date().toLocaleTimeString();
-    logEl.textContent += `[${t}] ${line}\n`;
-    logEl.scrollTop = logEl.scrollHeight;
-  }
+                const images = imageList.split(",").map(s => s.trim());
+                log(`📦 Получено изображений: ${images.length}`);
 
-  // SSE
-  const evtSource = new EventSource('/stream');
-  evtSource.addEventListener('log', e => {
-    appendLog(e.data);
-  });
-  evtSource.addEventListener('start', e => {
-    const d = JSON.parse(e.data);
-    total = d.total || 0;
-    totalEl.textContent = total;
-    processed = 0;
-    processedEl.textContent = processed;
-    unknown = 0;
-    unknownEl.textContent = unknown;
-    prog.style.width = '0%';
-  });
-  evtSource.addEventListener('progress', e => {
-    const d = JSON.parse(e.data);
-    processed = d.processed || processed;
-    processedEl.textContent = processed;
-    const pct = total>0 ? Math.round((processed/total)*100) : 0;
-    prog.style.width = pct + '%';
-    prog.textContent = pct + '%';
-  });
-  evtSource.addEventListener('result', e => {
-    const d = JSON.parse(e.data);
-    const preview = d.text_preview || d.text || '';
-    appendLog(`✅ ${d.file} → ${preview.slice(0,180)}`);
-    if(preview === 'UNKNOWN') {
-      unknown++;
-      unknownEl.textContent = unknown;
-    }
-  });
-  evtSource.addEventListener('done', e => {
-    const d = JSON.parse(e.data);
-    appendLog(`🎉 Done. Processed: ${d.processed}`);
-    // ping limits after done
-    fetch('/limits').then(r=>r.json()).then(j=>{
-      apiStatus.textContent = j.api_key_present ? 'present' : 'missing';
-      if(j.checked){
-        limitStatus.textContent = j.ok ? `OK (code ${j.status_code})` : `ERROR (${j.status_code})`;
-      } else {
-        limitStatus.textContent = j.note || 'n/a';
-      }
-    }).catch(_=>{});
-  });
-  evtSource.addEventListener('error', e => {
-    appendLog(`❌ error: ${e.data || '(connection error)'}`);
-  });
+                const res = await fetch("/analyze", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ images })
+                });
 
-  // endpoints
-  startBtn.onclick = async () => {
-    appendLog('▶ Requesting start...');
-    const r = await fetch('/start', { method: 'POST' });
-    if(r.status === 200 || r.status === 201){
-      appendLog('Worker started');
-    } else if(r.status === 409){
-      appendLog('Worker already running');
-    } else {
-      const j = await r.json().catch(()=>({}));
-      appendLog('Start failed: ' + (j.message || r.statusText));
-    }
-    // refresh limits
-    fetch('/limits').then(r=>r.json()).then(j=>{
-      apiStatus.textContent = j.api_key_present ? 'present' : 'missing';
-      limitStatus.textContent = j.note || (j.checked ? (j.ok ? 'OK' : 'ERROR') : 'n/a');
-    }).catch(_=>{});
-  };
+                const data = await res.json();
+                if (data.status !== "ok") {
+                    throw new Error(data.message || "Неизвестная ошибка при анализе");
+                }
 
-  stopBtn.onclick = async () => {
-    appendLog('⏸ Requesting stop...');
-    const r = await fetch('/stop', { method: 'POST' });
-    if(r.ok) appendLog('Stop requested');
-    else appendLog('Stop request failed');
-  };
+                log("✅ Анализ запущен...", "#2ecc71");
 
-  // initial limits check
-  fetch('/limits').then(r=>r.json()).then(j=>{
-    apiStatus.textContent = j.api_key_present ? 'present' : 'missing';
-    limitStatus.textContent = j.note || (j.checked ? (j.ok ? 'OK' : 'ERROR') : 'n/a');
-  }).catch(_=>{});
-})();
-</script>
+                let processed = 0;
+                for (const result of data.results) {
+                    processed++;
+                    const percent = Math.round((processed / data.results.length) * 100);
+                    progressBar.style.width = percent + "%";
+
+                    if (result.status === "ok") {
+                        log(`🟢 [${processed}] ${result.image} → ${result.text}`, "#2ecc71");
+                    } else {
+                        log(`🔴 [${processed}] ${result.image} → ${result.text}`, "#e74c3c");
+                    }
+                }
+
+                log("🎉 Анализ завершён!", "#00cec9");
+                statusMsg.textContent = "✅ Готово";
+                statusMsg.className = "status success";
+
+            } catch (err) {
+                log("💥 Ошибка: " + err.message, "#e74c3c");
+                statusMsg.textContent = "❌ Ошибка";
+                statusMsg.className = "status error";
+            }
+
+            startBtn.disabled = false;
+        }
+
+        startBtn.addEventListener("click", startAnalyze);
+    </script>
 </body>
 </html>
