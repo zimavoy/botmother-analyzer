@@ -6,7 +6,6 @@ from flask import Flask, jsonify, render_template, send_from_directory
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
-from dotenv import load_dotenv
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -200,3 +199,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Flask запущен на порту {port}")
     app.run(host="0.0.0.0", port=port)
+
