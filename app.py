@@ -1,29 +1,24 @@
 import os
-import io
-import base64
+import json
 import traceback
 import requests
-from flask import Flask, jsonify, render_template, Response
+from flask import Flask, jsonify, render_template, send_from_directory
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
-from time import sleep
+from dotenv import load_dotenv
 
-# ---------------- CONFIG ---------------- #
+# Загружаем переменные окружения
+load_dotenv()
 
-app = Flask(__name__, static_folder="static", template_folder="static")
+app = Flask(__name__, static_folder='static', template_folder='static')
 
 REQUIRED_ENV_VARS = [
     "YANDEX_API_KEY",
-    "YANDEX_FOLDER_ID",
     "SPREADSHEET_ID",
     "TO_ANALYZE_FOLDER_ID",
     "ANALYZED_FOLDER_ID",
 ]
-
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
-YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
 
 HEADERS = [
     "Catalog Number",
@@ -36,11 +31,10 @@ HEADERS = [
     "File URL",
 ]
 
-# -------- Utility -------- #
-def emit_event(event: str, data: str):
-    """Send event for frontend via SSE (console fallback)"""
-    print(f"[EVENT] {event}: {data}")
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
+YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
 
+# --- Проверка окружения ---
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -49,210 +43,160 @@ def check_requirements():
     if not os.path.exists("credentials.json"):
         print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
 
+# --- Инициализация сервисов Google ---
 def get_google_services():
     creds = Credentials.from_service_account_file(
         "credentials.json",
-        scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ],
     )
     drive_service = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
 
+    # Проверяем или создаем заголовки
     try:
         existing = sheet.row_values(1)
         if not existing:
+            print("[INFO] Заголовки отсутствуют, добавляю...")
             sheet.insert_row(HEADERS, 1)
         elif existing != HEADERS:
+            print("[WARNING] Заголовки не совпадают, обновляю...")
             sheet.delete_rows(1)
             sheet.insert_row(HEADERS, 1)
+        else:
+            print("[INFO] Заголовки корректны.")
     except Exception as e:
         print(f"[ERROR] Ошибка проверки заголовков: {e}")
 
     return drive_service, sheet
 
-def list_drive_images(drive):
-    folder = os.getenv("TO_ANALYZE_FOLDER_ID")
-    results = drive.files().list(
-        q=f"'{folder}' in parents and mimeType contains 'image/'",
-        fields="files(id, name, webViewLink, webContentLink)"
-    ).execute()
-    return results.get("files", [])
-
-def download_drive_file_bytes(drive, file_id: str):
-    """Скачать файл как bytes"""
-    try:
-        request = drive.files().get_media(fileId=file_id)
-        from googleapiclient.http import MediaIoBaseDownload
-        buf = io.BytesIO()
-        downloader = MediaIoBaseDownload(buf, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        emit_event("log", f"Ошибка скачивания файла {file_id}: {e}")
-        return b""
-
-# ----------- Yandex Vision API ----------- #
-
-def call_yandex_vision_with_url(image_url: str, retries=2):
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "folderId": YANDEX_FOLDER_ID,
-        "analyze_specs": [
-            {
-                "features": [{"type": "TEXT_DETECTION"}],
-                "source": {"uri": image_url}
-            }
-        ]
-    }
-
-    for attempt in range(retries + 1):
-        try:
-            r = requests.post(YANDEX_VISION_URL, headers=headers, json=payload, timeout=55)
-            if r.status_code == 200:
-                return True, r.json(), 200
-            emit_event("log", f"Yandex(url) code={r.status_code} body={r.text[:300]}")
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
-                sleep(2 ** attempt)
-                continue
-            return False, r.text, r.status_code
-        except requests.RequestException as e:
-            emit_event("log", f"Yandex(url) exception: {e}")
-            sleep(2)
-    return False, "request failed", None
-
-def call_yandex_vision_with_bytes(image_bytes: bytes, retries=1):
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    payload = {
-        "folderId": YANDEX_FOLDER_ID,
-        "analyze_specs": [
-            {
-                "features": [{"type": "TEXT_DETECTION"}],
-                "content": {"bytes": b64}
-            }
-        ]
-    }
-
-    for attempt in range(retries + 1):
-        try:
-            r = requests.post(YANDEX_VISION_URL, headers=headers, json=payload, timeout=70)
-            if r.status_code == 200:
-                return True, r.json(), 200
-            emit_event("log", f"Yandex(bytes) code={r.status_code} body={r.text[:300]}")
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
-                sleep(2 ** attempt)
-                continue
-            return False, r.text, r.status_code
-        except requests.RequestException as e:
-            emit_event("log", f"Yandex(bytes) exception: {e}")
-            sleep(1)
-    return False, "request failed", None
-
-def parse_text_from_yandex_response(resp_json):
-    try:
-        collected = []
-        for result in resp_json.get("results", []):
-            for rr in result.get("results", []):
-                td = rr.get("textDetection")
-                if not td:
-                    continue
-                for p in td.get("pages", []):
-                    for block in p.get("blocks", []):
-                        for line in block.get("lines", []):
-                            words = [w.get("text", "") for w in line.get("words", [])]
-                            if words:
-                                collected.append(" ".join(words))
-        return "\n".join(collected) if collected else "UNKNOWN"
-    except Exception as e:
-        emit_event("log", f"Ошибка парсинга: {e}")
-        traceback.print_exc()
-        return "UNKNOWN"
-
-# ---------- Flask Routes ---------- #
-
+# --- Эндпоинты интерфейса ---
 @app.route("/")
 def index():
-    return app.send_static_file("index.html")
+    return send_from_directory("static", "index.html")
 
-@app.route("/debug_first", methods=["GET"])
-def debug_first():
-    """Берёт первую картинку и возвращает подробности анализа"""
+@app.route("/ping")
+def ping():
+    return jsonify({"status": "ok", "message": "pong"})
+
+# --- Проверка лимитов Yandex Vision ---
+@app.route("/api/limits")
+def api_limits():
     try:
-        drive, _ = get_google_services()
-        files = list_drive_images(drive)
-        if not files:
-            return jsonify({"ok": False, "error": "Нет файлов"}), 400
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
+        resp = requests.get(
+            "https://vision.api.cloud.yandex.net/vision/v1/quotas", headers=headers
+        )
+        if resp.status_code != 200:
+            return jsonify({"total": "—", "remaining": "—"})
 
-        f = files[0]
-        url = f.get("webContentLink")
-        file_id = f["id"]
-        file_name = f["name"]
-        result = {"file": file_name, "url": url}
-
-        ok, resp, code = call_yandex_vision_with_url(url)
-        result["url_result"] = {"ok": ok, "code": code, "snippet": str(resp)[:1000]}
-
-        if not ok:
-            emit_event("log", f"URL-анализ не удался, пробую байты для {file_name}")
-            data = download_drive_file_bytes(drive, file_id)
-            ok2, resp2, code2 = call_yandex_vision_with_bytes(data)
-            result["bytes_result"] = {"ok": ok2, "code": code2, "snippet": str(resp2)[:1000]}
-
-        return jsonify(result)
+        data = resp.json()
+        total = data.get("analyze_image", {}).get("limit", 0)
+        remaining = data.get("analyze_image", {}).get("remaining", 0)
+        return jsonify({"total": total, "remaining": remaining})
     except Exception as e:
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": str(e)}), 500
+        print("[ERROR] Не удалось получить лимиты:", e)
+        return jsonify({"total": "—", "remaining": "—"})
 
+# --- Основной анализ изображений ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
         drive, sheet = get_google_services()
-        files = list_drive_images(drive)
+        TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
+        ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
+
+        results = drive.files().list(
+            q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
+            fields="files(id, name, webViewLink, webContentLink)",
+        ).execute()
+
+        files = results.get("files", [])
+        if not files:
+            return jsonify({"status": "error", "message": "Нет изображений для анализа"})
+
         processed = []
-        total = len(files)
-        emit_event("log", f"Найдено {total} файлов для анализа.")
+        for f in files[:5]:  # Анализ 5 изображений за раз
+            file_id, file_name = f["id"], f["name"]
+            file_url = (
+                f.get("webContentLink")
+                or f"https://drive.google.com/uc?export=download&id={file_id}"
+            )
 
-        for idx, f in enumerate(files, start=1):
-            file_name, file_id = f["name"], f["id"]
-            url = f.get("webContentLink")
-            emit_event("progress", f"{idx}/{total}")
-            emit_event("log", f"Анализ {file_name}...")
+            print(f"[INFO] Анализ {file_name} через Yandex Vision API...")
 
-            # анализ изображения
-            text = "UNKNOWN"
             try:
-                ok, resp, _ = call_yandex_vision_with_url(url)
-                if ok:
-                    text = parse_text_from_yandex_response(resp)
-                else:
-                    data = download_drive_file_bytes(drive, file_id)
-                    ok2, resp2, _ = call_yandex_vision_with_bytes(data)
-                    text = parse_text_from_yandex_response(resp2) if ok2 else "ERROR"
+                image_resp = requests.get(file_url)
+                image_bytes = image_resp.content
+                b64_image = image_bytes.encode("base64") if hasattr(image_bytes, "encode") else None
+
+                data = {
+                    "analyze_specs": [
+                        {
+                            "content": b64_image,
+                            "features": [{"type": "TEXT_DETECTION", "text_detection_config": {"language_codes": ["*"]}}],
+                        }
+                    ]
+                }
+
+                headers = {
+                    "Authorization": f"Api-Key {YANDEX_API_KEY}",
+                    "Content-Type": "application/json",
+                }
+
+                response = requests.post(YANDEX_VISION_URL, headers=headers, data=json.dumps(data))
+                if response.status_code != 200:
+                    raise Exception(f"Yandex Vision error: {response.text}")
+
+                vision_data = response.json()
+                text_blocks = vision_data["results"][0]["results"][0]["textDetection"]["pages"][0]["blocks"]
+                detected_text = " ".join(
+                    [
+                        word["text"]
+                        for block in text_blocks
+                        for line in block.get("lines", [])
+                        for word in line.get("words", [])
+                    ]
+                )
+
+                print(f"[INFO] Распознанный текст: {detected_text[:80]}...")
+
+                # Простая фильтрация
+                catalog_number = "UNKNOWN"
+                description = detected_text[:100] or "UNKNOWN"
+
+                sheet.append_row(
+                    [
+                        catalog_number,
+                        description,
+                        "UNKNOWN",
+                        "UNKNOWN",
+                        "UNKNOWN",
+                        detected_text,
+                        "UNKNOWN",
+                        file_url,
+                    ]
+                )
+
+                processed.append({"file": file_name, "text": detected_text})
+
             except Exception as e:
-                emit_event("log", f"Ошибка анализа {file_name}: {e}")
+                print(f"[ERROR] Ошибка анализа {file_name}: {e}")
                 traceback.print_exc()
 
-            sheet.append_row(["-", text, "-", "-", "-", "-", "-", url])
-            processed.append({"file": file_name, "text": text})
-            sleep(1)  # разгрузка памяти
-
-        return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
+        return jsonify(
+            {"status": "success", "processed_count": len(processed), "processed": processed}
+        )
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ---------- Main ---------- #
+
 if __name__ == "__main__":
     check_requirements()
     port = int(os.getenv("PORT", 5000))
-    print(f"[INFO] Запуск Flask на порту {port}...")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    print(f"[INFO] Flask запущен на порту {port}")
+    app.run(host="0.0.0.0", port=port)
