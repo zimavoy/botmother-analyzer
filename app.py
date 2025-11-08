@@ -1,20 +1,16 @@
 import os
-import json
 import traceback
-import requests
-from flask import Flask, jsonify, render_template, send_from_directory
+from flask import Flask, jsonify, render_template
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
+from yandex_cloud import SDK
+import requests
+import time
 
-app = Flask(__name__, static_folder='static', template_folder='static')
+app = Flask(__name__)
 
-REQUIRED_ENV_VARS = [
-    "YANDEX_API_KEY",
-    "SPREADSHEET_ID",
-    "TO_ANALYZE_FOLDER_ID",
-    "ANALYZED_FOLDER_ID",
-]
+REQUIRED_ENV_VARS = ["YANDEX_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
 HEADERS = [
     "Catalog Number",
@@ -27,174 +23,143 @@ HEADERS = [
     "File URL",
 ]
 
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
-YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+BATCH_SIZE = 5
 
-# --- Проверка окружения ---
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
         print(f"[WARNING] Не заданы: {', '.join(missing)}")
-    if not os.path.exists("credentials.json"):
-        print("[ERROR] Нет файла credentials.json — Google API работать не будет.")
+    credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/run/secrets/credentials.json")
+    if not os.path.exists(credentials_path):
+        print(f"[ERROR] Нет файла с сервисными учетными данными Google: {credentials_path}")
 
-# --- Инициализация сервисов Google ---
 def get_google_services():
+    credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/run/secrets/credentials.json")
     creds = Credentials.from_service_account_file(
-        "credentials.json",
-        scopes=[
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/spreadsheets",
-        ],
+        credentials_path,
+        scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
     )
     drive_service = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
 
-    # Проверяем или создаем заголовки
     try:
         existing = sheet.row_values(1)
         if not existing:
-            print("[INFO] Заголовки отсутствуют, добавляю...")
             sheet.insert_row(HEADERS, 1)
         elif existing != HEADERS:
-            print("[WARNING] Заголовки не совпадают, обновляю...")
             sheet.delete_rows(1)
             sheet.insert_row(HEADERS, 1)
-        else:
-            print("[INFO] Заголовки корректны.")
     except Exception as e:
         print(f"[ERROR] Ошибка проверки заголовков: {e}")
 
     return drive_service, sheet
 
-# --- Эндпоинты интерфейса ---
+def get_yandex_client():
+    sdk = SDK(token=os.getenv("YANDEX_API_KEY"))
+    return sdk.client("vision.v1.ImageAnnotatorService")
+
 @app.route("/")
 def index():
-    return send_from_directory("static", "index.html")
+    return render_template("index.html")
 
-@app.route("/ping")
+@app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
 
-# --- Проверка лимитов Yandex Vision ---
-@app.route("/api/limits")
-def api_limits():
-    try:
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}"}
-        resp = requests.get(
-            "https://vision.api.cloud.yandex.net/vision/v1/quotas", headers=headers
-        )
-        if resp.status_code != 200:
-            return jsonify({"total": "—", "remaining": "—"})
-
-        data = resp.json()
-        total = data.get("analyze_image", {}).get("limit", 0)
-        remaining = data.get("analyze_image", {}).get("remaining", 0)
-        return jsonify({"total": total, "remaining": remaining})
-    except Exception as e:
-        print("[ERROR] Не удалось получить лимиты:", e)
-        return jsonify({"total": "—", "remaining": "—"})
-
-# --- Основной анализ изображений ---
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
         drive, sheet = get_google_services()
-        TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
-        ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
+        vision_client = get_yandex_client()
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
 
+    TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
+    ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
+    processed = []
+
+    try:
         results = drive.files().list(
             q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
             fields="files(id, name, webViewLink, webContentLink)",
         ).execute()
-
         files = results.get("files", [])
-        if not files:
-            return jsonify({"status": "error", "message": "Нет изображений для анализа"})
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
 
-        processed = []
-        for f in files[:5]:  # Анализ 5 изображений за раз
+    # Обработка пакетами
+    for i in range(0, len(files), BATCH_SIZE):
+        batch = files[i:i + BATCH_SIZE]
+        for f in batch:
             file_id, file_name = f["id"], f["name"]
-            file_url = (
-                f.get("webContentLink")
-                or f"https://drive.google.com/uc?export=download&id={file_id}"
-            )
+            file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
 
-            print(f"[INFO] Анализ {file_name} через Yandex Vision API...")
+            # Начальные значения
+            catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
 
             try:
-                image_resp = requests.get(file_url)
-                image_bytes = image_resp.content
-                b64_image = image_bytes.encode("base64") if hasattr(image_bytes, "encode") else None
-
-                data = {
-                    "analyze_specs": [
-                        {
-                            "content": b64_image,
-                            "features": [{"type": "TEXT_DETECTION", "text_detection_config": {"language_codes": ["*"]}}],
-                        }
-                    ]
-                }
-
-                headers = {
-                    "Authorization": f"Api-Key {YANDEX_API_KEY}",
-                    "Content-Type": "application/json",
-                }
-
-                response = requests.post(YANDEX_VISION_URL, headers=headers, data=json.dumps(data))
-                if response.status_code != 200:
-                    raise Exception(f"Yandex Vision error: {response.text}")
-
-                vision_data = response.json()
-                text_blocks = vision_data["results"][0]["results"][0]["textDetection"]["pages"][0]["blocks"]
-                detected_text = " ".join(
-                    [
-                        word["text"]
-                        for block in text_blocks
-                        for line in block.get("lines", [])
-                        for word in line.get("words", [])
-                    ]
-                )
-
-                print(f"[INFO] Распознанный текст: {detected_text[:80]}...")
-
-                # Простая фильтрация
-                catalog_number = "UNKNOWN"
-                description = detected_text[:100] or "UNKNOWN"
-
-                sheet.append_row(
-                    [
-                        catalog_number,
-                        description,
-                        "UNKNOWN",
-                        "UNKNOWN",
-                        "UNKNOWN",
-                        detected_text,
-                        "UNKNOWN",
-                        file_url,
-                    ]
-                )
-
-                processed.append({"file": file_name, "text": detected_text})
+                print(f"[INFO] Анализ {file_name} ...")
+                # Пример запроса к Yandex Vision API (OCR/TextDetection)
+                resp = vision_client.annotate_text({
+                    "features": [{"type": "TEXT_DETECTION"}],
+                    "image": {"source": {"image_uri": file_url}}
+                })
+                texts = [t.text for t in resp.responses[0].text_annotations]
+                full_text = " ".join(texts)
+                # Здесь можно распарсить текст и заполнить поля
+                # Пример: ищем Catalog Number, Description и др.
+                if "Catalog" in full_text:
+                    catalog_number = full_text.split("Catalog")[1].split()[0]
+                if "Description" in full_text:
+                    description = full_text.split("Description")[1].split("\n")[0]
+                # Остальные поля можно аналогично заполнить
 
             except Exception as e:
                 print(f"[ERROR] Ошибка анализа {file_name}: {e}")
                 traceback.print_exc()
 
-        return jsonify(
-            {"status": "success", "processed_count": len(processed), "processed": processed}
-        )
+            # Перемещение файла на ANALYZED
+            try:
+                file_info = drive.files().get(fileId=file_id, fields="parents").execute()
+                prev_parents = ",".join(file_info.get("parents", []))
+                drive.files().update(
+                    fileId=file_id,
+                    addParents=ANALYZED,
+                    removeParents=prev_parents,
+                    fields="id, parents"
+                ).execute()
+            except Exception:
+                print(f"[ERROR] Не удалось переместить {file_name}")
+                traceback.print_exc()
 
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
+            # Запись в Google Sheet
+            try:
+                sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model, file_url])
+            except Exception:
+                print(f"[ERROR] Не удалось записать строку для {file_name}")
+                traceback.print_exc()
 
+            processed.append({
+                "file": file_name,
+                "catalog_number": catalog_number,
+                "description": description,
+                "machine_type": machine_type,
+                "manufacturer": manufacturer,
+                "analogs": analogs,
+                "detail_description": detail_description,
+                "machine_model": machine_model
+            })
+
+        # Пауза между пакетами для экономии памяти и лимитов
+        time.sleep(1)
+
+    return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
 if __name__ == "__main__":
     check_requirements()
     port = int(os.getenv("PORT", 5000))
-    print(f"[INFO] Flask запущен на порту {port}")
-    app.run(host="0.0.0.0", port=port)
-
-
+    print(f"[INFO] Запуск Flask на порту {port}...")
+    app.run(host="0.0.0.0", port=port, debug=True)
