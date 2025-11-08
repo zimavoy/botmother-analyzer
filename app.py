@@ -7,9 +7,6 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
 
-# Загружаем переменные окружения
-load_dotenv()
-
 app = Flask(__name__, static_folder='static', template_folder='static')
 
 REQUIRED_ENV_VARS = [
@@ -199,4 +196,5 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Flask запущен на порту {port}")
     app.run(host="0.0.0.0", port=port)
+
 
