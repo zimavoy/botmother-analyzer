@@ -1,22 +1,16 @@
 import os
 import traceback
-import requests
-import time
 from flask import Flask, jsonify, render_template
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
+from yandexcloud import SDK
+import requests
+import time
 
 app = Flask(__name__)
 
-# ======== Конфигурация ========
-REQUIRED_ENV_VARS = [
-    "YANDEX_API_KEY",
-    "SPREADSHEET_ID",
-    "TO_ANALYZE_FOLDER_ID",
-    "ANALYZED_FOLDER_ID",
-    "YANDEX_FOLDER_ID",
-]
+REQUIRED_ENV_VARS = ["YANDEX_API_KEY", "SPREADSHEET_ID", "TO_ANALYZE_FOLDER_ID", "ANALYZED_FOLDER_ID"]
 
 HEADERS = [
     "Catalog Number",
@@ -30,32 +24,21 @@ HEADERS = [
 ]
 
 BATCH_SIZE = 5
-YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
 
-
-# ======== Проверка окружения ========
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
         print(f"[WARNING] Не заданы: {', '.join(missing)}")
-
     credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/run/secrets/credentials.json")
     if not os.path.exists(credentials_path):
         print(f"[ERROR] Нет файла с сервисными учетными данными Google: {credentials_path}")
-    else:
-        print(f"[INFO] Найден файл сервисных данных: {credentials_path}")
 
-
-# ======== Авторизация Google ========
 def get_google_services():
     credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/run/secrets/credentials.json")
     creds = Credentials.from_service_account_file(
         credentials_path,
-        scopes=[
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/spreadsheets",
-        ],
+        scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
     )
     drive_service = build("drive", "v3", credentials=creds)
     sheet = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
@@ -68,57 +51,31 @@ def get_google_services():
             sheet.delete_rows(1)
             sheet.insert_row(HEADERS, 1)
     except Exception as e:
-        print(f"[ERROR] Ошибка проверки заголовков таблицы: {e}")
+        print(f"[ERROR] Ошибка проверки заголовков: {e}")
 
     return drive_service, sheet
 
-
-# ======== Вызов Яндекс Vision через REST ========
-def analyze_image_with_yandex(image_bytes):
-    headers = {
-        "Authorization": f"Api-Key {os.getenv('YANDEX_API_KEY')}",
-    }
-    folder_id = os.getenv("YANDEX_FOLDER_ID")
-
-    body = {
-        "folderId": folder_id,
-        "analyze_specs": [
-            {
-                "content": image_bytes.decode("latin1"),
-                "features": [{"type": "TEXT_DETECTION"}],
-            }
-        ],
-    }
-
-    try:
-        response = requests.post(YANDEX_VISION_URL, headers=headers, json=body, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"[ERROR] Ошибка запроса к Яндекс Vision: {e}")
-        traceback.print_exc()
-        return None
-
-
-# ======== Flask маршруты ========
+def get_yandex_client():
+    token = os.getenv("YANDEX_API_KEY")
+    sdk = SDK(iam_token=token)
+    return sdk.client(service_name="ai.vision.v1.ImageAnalyzer")
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
-
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
     try:
         drive, sheet = get_google_services()
+        vision_client = get_yandex_client()
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"status": "error", "message": f"Google Auth: {e}"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
     TO_ANALYZE = os.getenv("TO_ANALYZE_FOLDER_ID")
     ANALYZED = os.getenv("ANALYZED_FOLDER_ID")
@@ -127,11 +84,9 @@ def analyze():
     try:
         results = drive.files().list(
             q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
-            fields="files(id, name, webViewLink, webContentLink)",
+            fields="files(id, name, webViewLink, webContentLink)"
         ).execute()
         files = results.get("files", [])
-        if not files:
-            return jsonify({"status": "success", "message": "Нет изображений для анализа", "processed_count": 0})
     except Exception:
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
@@ -146,21 +101,22 @@ def analyze():
 
             try:
                 print(f"[INFO] Анализ {file_name} ...")
-                image_data = requests.get(file_url).content
-                analysis = analyze_image_with_yandex(image_data)
-
-                if not analysis:
-                    raise Exception("Пустой ответ от Vision API")
+                image_content = requests.get(file_url).content
+                response = vision_client.Analyze(
+                    folder_id=os.getenv("YANDEX_FOLDER_ID"),
+                    analyze_specs=[{
+                        "content": image_content,
+                        "features": [{"type": "TEXT_DETECTION"}]
+                    }]
+                )
 
                 texts = []
-                for result in analysis.get("results", []):
-                    for page in result.get("results", []):
-                        blocks = page.get("textDetection", {}).get("pages", [{}])[0].get("blocks", [])
-                        for block in blocks:
-                            for line in block.get("lines", []):
-                                text = "".join([el.get("text", "") for el in line.get("elements", [])])
-                                texts.append(text)
-
+                for result in response.results:
+                    for page in result.text_detection.pages:
+                        for block in page.blocks:
+                            for line in block.lines:
+                                line_text = "".join([el.text for el in line.elements])
+                                texts.append(line_text)
                 full_text = " ".join(texts)
 
                 if "Catalog" in full_text:
@@ -172,7 +128,6 @@ def analyze():
                 print(f"[ERROR] Ошибка анализа {file_name}: {e}")
                 traceback.print_exc()
 
-            # Перемещение файла
             try:
                 file_info = drive.files().get(fileId=file_id, fields="parents").execute()
                 prev_parents = ",".join(file_info.get("parents", []))
@@ -186,18 +141,8 @@ def analyze():
                 print(f"[ERROR] Не удалось переместить {file_name}")
                 traceback.print_exc()
 
-            # Запись в таблицу
             try:
-                sheet.append_row([
-                    catalog_number,
-                    description,
-                    machine_type,
-                    manufacturer,
-                    analogs,
-                    detail_description,
-                    machine_model,
-                    file_url,
-                ])
+                sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model, file_url])
             except Exception:
                 print(f"[ERROR] Не удалось записать строку для {file_name}")
                 traceback.print_exc()
@@ -205,18 +150,12 @@ def analyze():
             processed.append({
                 "file": file_name,
                 "catalog_number": catalog_number,
-                "description": description,
+                "description": description
             })
 
         time.sleep(1)
 
-    return jsonify({
-        "status": "success",
-        "message": "Анализ завершён",
-        "processed_count": len(processed),
-        "processed": processed,
-    })
-
+    return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
 if __name__ == "__main__":
     check_requirements()
