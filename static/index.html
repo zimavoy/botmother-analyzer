@@ -103,14 +103,8 @@
         }
 
         async function updateLimits() {
-            try {
-                const res = await fetch('/api/limits');
-                if (!res.ok) throw new Error("Ошибка API");
-                const data = await res.json();
-                limitsDiv.textContent = `Лимит: ${data.total} / Осталось: ${data.remaining}`;
-            } catch {
-                limitsDiv.textContent = "Лимит: недоступен";
-            }
+            // Пока заглушка для Yandex Vision
+            limitsDiv.textContent = `Лимит: — / Осталось: —`;
         }
 
         async function checkServer() {
@@ -142,8 +136,8 @@
                 });
                 const data = await res.json();
 
-                if (data.status === 'success') {
-                    statusDiv.textContent = `✅ ${data.message}`;
+                if (data.status === 'done') {
+                    statusDiv.textContent = `✅ Анализ завершён`;
                     progressBar.style.width = '100%';
                     addLog(`Анализ успешно завершён. Обработано: ${data.processed_count}`);
                 } else {
