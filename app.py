@@ -4,7 +4,7 @@ from flask import Flask, jsonify, render_template
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 import gspread
-from yandex_cloud import SDK
+from yandexcloud import SDK  # ✅ исправленный импорт
 import requests
 import time
 
@@ -56,8 +56,11 @@ def get_google_services():
     return drive_service, sheet
 
 def get_yandex_client():
-    sdk = SDK(token=os.getenv("YANDEX_API_KEY"))
-    return sdk.client("vision.v1.ImageAnnotatorService")
+    token = os.getenv("YANDEX_API_KEY")
+    sdk = SDK(iam_token=token)
+    return sdk.client(  # ✅ создаём Vision клиент
+        service_name="ai.vision.v1.ImageAnalyzer"
+    )
 
 @app.route("/")
 def index():
@@ -90,38 +93,43 @@ def analyze():
         traceback.print_exc()
         return jsonify({"status": "error", "message": "Google Drive недоступен"}), 500
 
-    # Обработка пакетами
     for i in range(0, len(files), BATCH_SIZE):
         batch = files[i:i + BATCH_SIZE]
         for f in batch:
             file_id, file_name = f["id"], f["name"]
             file_url = f.get("webContentLink") or f"https://drive.google.com/uc?export=download&id={file_id}"
 
-            # Начальные значения
             catalog_number = description = machine_type = manufacturer = analogs = detail_description = machine_model = "UNKNOWN"
 
             try:
                 print(f"[INFO] Анализ {file_name} ...")
-                # Пример запроса к Yandex Vision API (OCR/TextDetection)
-                resp = vision_client.annotate_text({
-                    "features": [{"type": "TEXT_DETECTION"}],
-                    "image": {"source": {"image_uri": file_url}}
-                })
-                texts = [t.text for t in resp.responses[0].text_annotations]
+                # Простая проверка через Vision API
+                response = vision_client.Analyze(
+                    folder_id=os.getenv("YANDEX_FOLDER_ID"),
+                    analyze_specs=[{
+                        "content": requests.get(file_url).content,
+                        "features": [{"type": "TEXT_DETECTION"}]
+                    }]
+                )
+
+                texts = []
+                for result in response.results:
+                    for text_block in result.text_detection.pages[0].blocks:
+                        for line in text_block.lines:
+                            line_text = "".join([el.text for el in line.elements])
+                            texts.append(line_text)
+
                 full_text = " ".join(texts)
-                # Здесь можно распарсить текст и заполнить поля
-                # Пример: ищем Catalog Number, Description и др.
+
                 if "Catalog" in full_text:
                     catalog_number = full_text.split("Catalog")[1].split()[0]
                 if "Description" in full_text:
                     description = full_text.split("Description")[1].split("\n")[0]
-                # Остальные поля можно аналогично заполнить
 
             except Exception as e:
                 print(f"[ERROR] Ошибка анализа {file_name}: {e}")
                 traceback.print_exc()
 
-            # Перемещение файла на ANALYZED
             try:
                 file_info = drive.files().get(fileId=file_id, fields="parents").execute()
                 prev_parents = ",".join(file_info.get("parents", []))
@@ -135,7 +143,6 @@ def analyze():
                 print(f"[ERROR] Не удалось переместить {file_name}")
                 traceback.print_exc()
 
-            # Запись в Google Sheet
             try:
                 sheet.append_row([catalog_number, description, machine_type, manufacturer, analogs, detail_description, machine_model, file_url])
             except Exception:
@@ -145,15 +152,9 @@ def analyze():
             processed.append({
                 "file": file_name,
                 "catalog_number": catalog_number,
-                "description": description,
-                "machine_type": machine_type,
-                "manufacturer": manufacturer,
-                "analogs": analogs,
-                "detail_description": detail_description,
-                "machine_model": machine_model
+                "description": description
             })
 
-        # Пауза между пакетами для экономии памяти и лимитов
         time.sleep(1)
 
     return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
