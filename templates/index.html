@@ -1,1 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Анализ изображений</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #10131a;
+            color: #f1f1f1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: start;
+            height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 {
+            margin-top: 30px;
+            color: #00ffc3;
+        }
+        button {
+            margin-top: 20px;
+            padding: 10px 25px;
+            font-size: 16px;
+            background-color: #00ffc3;
+            color: #10131a;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        button:hover {
+            background-color: #00cc9e;
+        }
+        #status {
+            margin-top: 20px;
+            font-size: 15px;
+            color: #00ffc3;
+        }
+        #limits {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #999;
+        }
+        #progress-container {
+            margin-top: 25px;
+            width: 80%;
+            max-width: 500px;
+            background-color: #333;
+            border-radius: 10px;
+            overflow: hidden;
+            height: 24px;
+            display: none;
+        }
+        #progress-bar {
+            height: 100%;
+            width: 0%;
+            background-color: #00ffc3;
+            transition: width 0.3s ease;
+        }
+        #log {
+            margin-top: 25px;
+            width: 80%;
+            max-width: 600px;
+            height: 200px;
+            overflow-y: auto;
+            background-color: #181c25;
+            border-radius: 10px;
+            padding: 15px;
+            font-family: monospace;
+            font-size: 14px;
+            color: #b0b0b0;
+            box-shadow: inset 0 0 5px #000;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧠 Анализ изображений</h1>
+    <button id="startBtn">🚀 Запустить анализ</button>
+    <div id="status"></div>
+    <div id="limits">Лимит: — / Осталось: —</div>
 
+    <div id="progress-container">
+        <div id="progress-bar"></div>
+    </div>
+
+    <div id="log"></div>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const statusDiv = document.getElementById('status');
+        const progressContainer = document.getElementById('progress-container');
+        const progressBar = document.getElementById('progress-bar');
+        const logDiv = document.getElementById('log');
+        const limitsDiv = document.getElementById('limits');
+
+        function addLog(msg) {
+            const now = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${now}] ${msg}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        async function updateLimits() {
+            // Пока заглушка для Yandex Vision
+            limitsDiv.textContent = `Лимит: — / Осталось: —`;
+        }
+
+        async function checkServer() {
+            try {
+                const res = await fetch('/ping');
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    addLog('✅ Сервер работает');
+                    updateLimits();
+                } else {
+                    addLog('⚠ Сервер ответил неожиданно');
+                }
+            } catch {
+                addLog('❌ Сервер недоступен');
+            }
+        }
+
+        async function startAnalysis() {
+            statusDiv.textContent = '▶ Отправляем запрос на сервер...';
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            addLog('Запуск анализа...');
+
+            try {
+                const res = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({start: true})
+                });
+                const data = await res.json();
+
+                if (data.status === 'done') {
+                    statusDiv.textContent = `✅ Анализ завершён`;
+                    progressBar.style.width = '100%';
+                    addLog(`Анализ успешно завершён. Обработано: ${data.processed_count}`);
+                } else {
+                    statusDiv.textContent = `❌ Ошибка: ${data.message}`;
+                    addLog(`Ошибка анализа: ${data.message}`);
+                }
+                updateLimits();
+            } catch (e) {
+                statusDiv.textContent = '❌ Ошибка соединения с сервером';
+                addLog('Ошибка при соединении с сервером');
+            }
+        }
+
+        startBtn.addEventListener('click', startAnalysis);
+        checkServer();
+    </script>
+</body>
+</html>
