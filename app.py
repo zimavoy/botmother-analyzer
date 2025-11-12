@@ -30,12 +30,12 @@ def check_requirements():
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
         print(f"[WARNING] Не заданы: {', '.join(missing)}")
-    credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/run/secrets/credentials.json")
+    credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/etc/secrets/credentials.json")
     if not os.path.exists(credentials_path):
         print(f"[ERROR] Нет файла с сервисными учетными данными Google: {credentials_path}")
 
 def get_google_services():
-    credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/run/secrets/credentials.json")
+    credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/etc/secrets/credentials.json")
     creds = Credentials.from_service_account_file(
         credentials_path,
         scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
@@ -162,3 +162,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Запуск Flask на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
+
