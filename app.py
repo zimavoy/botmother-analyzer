@@ -25,17 +25,25 @@ HEADERS = [
 
 BATCH_SIZE = 5
 
+
 def check_requirements():
     print("[INFO] Проверка окружения...")
     missing = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
     if missing:
         print(f"[WARNING] Не заданы: {', '.join(missing)}")
+
     credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/etc/secrets/credentials.json")
     if not os.path.exists(credentials_path):
-        print(f"[ERROR] Нет файла с сервисными учетными данными Google: {credentials_path}")
+        print(f"[ERROR] ❌ Файл с сервисными данными не найден: {credentials_path}")
+    else:
+        print(f"[INFO] ✅ Найден файл сервисного аккаунта: {credentials_path}")
+
 
 def get_google_services():
     credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/etc/secrets/credentials.json")
+    if not os.path.exists(credentials_path):
+        raise FileNotFoundError(f"Не найден файл credentials.json по пути: {credentials_path}")
+
     creds = Credentials.from_service_account_file(
         credentials_path,
         scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"],
@@ -55,18 +63,25 @@ def get_google_services():
 
     return drive_service, sheet
 
+
 def get_yandex_client():
     token = os.getenv("YANDEX_API_KEY")
+    if not token:
+        raise RuntimeError("Отсутствует переменная окружения YANDEX_API_KEY")
+
     sdk = SDK(iam_token=token)
     return sdk.client(service_name="ai.vision.v1.ImageAnalyzer")
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok", "message": "pong"})
+
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -84,7 +99,7 @@ def analyze():
     try:
         results = drive.files().list(
             q=f"'{TO_ANALYZE}' in parents and mimeType contains 'image/'",
-            fields="files(id, name, webViewLink, webContentLink)"
+            fields="files(id, name, webViewLink, webContentLink)",
         ).execute()
         files = results.get("files", [])
     except Exception:
@@ -101,22 +116,21 @@ def analyze():
 
             try:
                 print(f"[INFO] Анализ {file_name} ...")
-                image_content = requests.get(file_url).content
                 response = vision_client.Analyze(
                     folder_id=os.getenv("YANDEX_FOLDER_ID"),
                     analyze_specs=[{
-                        "content": image_content,
+                        "content": requests.get(file_url).content,
                         "features": [{"type": "TEXT_DETECTION"}]
                     }]
                 )
 
                 texts = []
                 for result in response.results:
-                    for page in result.text_detection.pages:
-                        for block in page.blocks:
-                            for line in block.lines:
-                                line_text = "".join([el.text for el in line.elements])
-                                texts.append(line_text)
+                    for text_block in result.text_detection.pages[0].blocks:
+                        for line in text_block.lines:
+                            line_text = "".join([el.text for el in line.elements])
+                            texts.append(line_text)
+
                 full_text = " ".join(texts)
 
                 if "Catalog" in full_text:
@@ -157,9 +171,9 @@ def analyze():
 
     return jsonify({"status": "done", "processed_count": len(processed), "processed": processed})
 
+
 if __name__ == "__main__":
     check_requirements()
     port = int(os.getenv("PORT", 5000))
     print(f"[INFO] Запуск Flask на порту {port}...")
     app.run(host="0.0.0.0", port=port, debug=True)
-
